@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v1
+        with:
+          cmake-version: '3.18.0'
+
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: Clean build and deps
+        run: |
+          rm -rf build/
+          rm -rf */build/
+          rm -rf */_deps/
+          rm -rf _deps/
+
+      - name: Configure project
+        run: cmake -S . -B build -DBUILD_TESTS=ON
+
+      - name: Build unit tests
+        run: cmake --build build --target logger_tests
+
+      - name: Run unit tests
+        run: ./build/logger_tests --gtest_color=yes
+
+      - name: Build examples
+        run: cmake --build build --target examples
+
+      - name: Run all examples
+        run: |
+          for exe in examples/*/*; do
+            if [[ -x "$exe" && ! "$exe" =~ \.cpp$ ]]; then
+              echo "Running $exe"
+              "$exe"
+            fi
+          done

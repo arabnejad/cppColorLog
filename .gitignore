@@ -1,0 +1,46 @@
+# Build directories
+build/
+**/build/
+CMakeFiles/
+**/CMakeFiles/
+
+# CMake generated files
+CMakeCache.txt
+cmake_install.cmake
+**/cmake_install.cmake
+*.cmake
+!CMakeLists.txt
+
+# Compiled files
+*.o
+*.obj
+*.exe
+*.out
+*.app
+*.dll
+*.so
+*.dylib
+
+# Ignore compiled executables in example folders
+/examples/*/*
+!*/**/*.cpp
+!*/**/*.h
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Example binaries (since they are built from source)
+examples/basic/basic_usage
+examples/advanced/advanced_usage
+
+# Dependencies
+_deps/
+
+# Generated files
+compile_commands.json
+Makefile
+*.make

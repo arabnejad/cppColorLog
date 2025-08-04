@@ -1,0 +1,17 @@
+BasedOnStyle: LLVM
+
+IndentWidth: 2               # Default LLVM indent is 2 spaces
+TabWidth: 2
+UseTab: Never                # Always use spaces
+ColumnLimit: 120             # Allow longer lines (LLVM prefers 120+)
+
+PointerAlignment: Right      # `int *ptr` instead of `int* ptr`
+AllowShortFunctionsOnASingleLine: Empty
+BreakBeforeBraces: Attach    # Keep braces on the same line
+SpaceBeforeParens: ControlStatements
+AlwaysBreakAfterReturnType: None
+SortIncludes: false
+
+# Optional extras
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
