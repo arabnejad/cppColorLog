@@ -7,8 +7,20 @@ on:
     branches: ["**"]
 
 jobs:
-  build-and-test:
+  linux-build-and-test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - name: gcc
+            cc: gcc
+            cxx: g++
+          - name: clang
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -16,36 +28,37 @@ jobs:
       - name: Set up CMake
         uses: jwlawson/actions-setup-cmake@v1
         with:
-          cmake-version: '3.18.0'
+          cmake-version: '3.28.0'
 
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: Install compilers
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang
 
-      - name: Clean build and deps
-        run: |
-          rm -rf build/
-          rm -rf */build/
-          rm -rf */_deps/
-          rm -rf _deps/
+      - name: Build and run unit tests
+        run: make test BUILD_DIR=build-${{ matrix.name }}
+
+      - name: Build and run examples
+        run: make run-examples BUILD_DIR=build-${{ matrix.name }}
+
+  windows-build-and-test:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up CMake
+        uses: jwlawson/actions-setup-cmake@v1
+        with:
+          cmake-version: '3.28.0'
 
       - name: Configure project
-        run: cmake -S . -B build -DBUILD_TESTS=ON
+        run: cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
 
-      - name: Build unit tests
-        run: cmake --build build --target logger_tests
+      - name: Build project
+        run: cmake --build build --config Release
 
       - name: Run unit tests
-        run: ./build/logger_tests --gtest_color=yes
+        run: ctest --test-dir build -C Release --output-on-failure
 
-      - name: Build examples
-        run: cmake --build build --target examples
-
-      - name: Run all examples
-        run: |
-          for exe in examples/*/*; do
-            if [[ -x "$exe" && ! "$exe" =~ \.cpp$ ]]; then
-              echo "Running $exe"
-              "$exe"
-            fi
-          done
+      - name: Run examples
+        run: cmake --build build --config Release --target run_all_samples

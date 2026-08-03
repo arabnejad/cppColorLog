@@ -42,5 +42,4 @@ _deps/
 
 # Generated files
 compile_commands.json
-Makefile
 *.make

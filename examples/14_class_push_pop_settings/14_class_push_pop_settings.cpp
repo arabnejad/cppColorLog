@@ -4,22 +4,20 @@
 class Processor {
 public:
   void process() {
-    LOGGER.pushLogSetting();
-    LOGGER.setLogLevel(LOGLEVELL::ERROR);
-    LOGGER.setFilterLevels({LOGLEVELL::ERROR});
+    ScopedSettings temporary = LOGGER.scopedSettings();
+    LOGGER.setLogLevel(LogLevel::ERROR);
+    LOGGER.setFilterLevels({LogLevel::ERROR});
 
-    LOGGER_C(LOGLEVELL::INFO, "Filtered out");
-    LOGGER_C(LOGLEVELL::ERROR, "Logged inside scoped setting");
-
-    LOGGER.popLogSetting();
+    LOGGER_C(LogLevel::INFO, "Filtered out");
+    LOGGER_C(LogLevel::ERROR, "Logged inside scoped setting");
   }
 };
 
 int main() {
-  printf("Example 14: pushLogSetting/popLogSetting used inside class methods.\n");
-  LOGGER.setLogLevel(LOGLEVELL::INFO);
+  printf("Example 14: Scoped logger settings used inside class methods.\n");
+  LOGGER.setLogLevel(LogLevel::INFO);
   Processor p;
   p.process();
-  LOGGER_F(LOGLEVELL::INFO, "Back to normal settings");
+  LOGGER_F(LogLevel::INFO, "Back to normal settings");
   return 0;
 }

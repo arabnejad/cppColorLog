@@ -2,184 +2,223 @@
 
 <img src="logo.png" alt="CppColorLog Logo" width="18%">
 
-
-A lightweight, header-only, thread-safe, colorful C++ logger with custom sinks and color-coded output. Designed for C++11 and above, it works seamlessly with GCC, Clang, and MSVC.
+A small, header-only C++11 logger with colored console output, level filtering,
+multiple sinks, temporary settings, and thread-safe configuration and output.
 
 ## Features
 
-- Header-only library (single include)
-- C++11 and higher support
-- Thread-safe implementation
-- Colored console output with customizable colors
-- Multiple output sinks (console, file, custom)
-- Logger settings stack (log level, filters, colors, sinks) for temporary overrides
-- Automatic function and class name detection
-- Formatted timestamps
-- File output (colors stripped automatically)
-- Lightweight and efficient
+- One header and a CMake interface target
+- C++11 and newer
+- Thread-safe settings, output dispatch, file output, and memory snapshots
+- Customizable console colors
+- Console, file, in-memory, and user-defined sinks
+- Threshold and whitelist filtering
+- Exception-safe scoped settings, plus compatible push/pop methods
+- Automatic function and class context
+- Portable time formatting and guarded GNU demangling
 
-## Log Levels
+## Build with Make
 
-Default log levels with their colors:
-- `ALWAYS` (White)
-- `FATAL` (Magenta)
-- `ERROR` (Red)
-- `WARN` (Yellow)
-- `INFO` (Green)
-- `DEBUG` (Cyan)
-- `VERBOSE` (Blue)
+The repository `Makefile` wraps the CMake commands:
 
-## Build and Run
+| Action | Command |
+|---|---|
+| Configure and build everything | `make` |
+| Configure only | `make configure` |
+| Build examples | `make examples` |
+| Build and run examples | `make run-examples` |
+| Build tests | `make tests` |
+| Build and run tests | `make test` |
+| Format source | `make format` |
+| Install | `make install` |
+| Clean compiled outputs | `make clean` |
+| List commands | `make help` |
 
-You can configure, build, run, format, and test everything using CMake targets:
+Build settings can be overridden, for example:
 
-| Action               | Command                                            |
-|----------------------|----------------------------------------------------|
-| Configure            | `cmake -S . -B build`                              |
-| Build all examples   | `cmake --build build --target examples`            |
-| Run all examples     | `cmake --build build --target run_all_samples`     |
-| Format code          | `cmake --build build --target clang_format`        |
-| Build unit tests     | `cmake --build build --target tests`               |
-| Run unit tests       | `cmake --build build --target run_tests`           |
-
-Alternatively, to run unit tests with full output:
 ```bash
-./build/logger_tests --gtest_color=yes
+make BUILD_TYPE=Release JOBS=8
+make test BUILD_DIR=build-release BUILD_TYPE=Release
 ```
 
-## Basic Usage
+Direct CMake commands remain available:
+
+```bash
+cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+## Basic usage
 
 ```cpp
-#include <cstdio>
 #include "cppColorLogger/logger.h"
 
-class ColorDemo {
+int main() {
+  LOGGER.setLogLevel(LogLevel::DEBUG);
+
+  LOGGER_F(LogLevel::INFO, "Application started");
+  LOGGER_F(LogLevel::DEBUG, "Debug details");
+}
+```
+
+`setLogLevel()` sets the highest verbosity that is accepted. For example,
+`ERROR` accepts `ALWAYS`, `FATAL`, and `ERROR`, while `DEBUG` additionally
+accepts `WARN`, `INFO`, and `DEBUG`.
+
+## Log levels and default colors
+
+- `ALWAYS` — white
+- `FATAL` — magenta
+- `ERROR` — red
+- `WARN` — yellow
+- `INFO` — green
+- `DEBUG` — cyan
+- `VERBOSE` — blue
+
+`ALWAYS` always passes the verbosity threshold. Like every other level, it can
+still be excluded by an active whitelist filter.
+
+## Logging from a class
+
+`LOGGER_C` adds the class and method name. `LOGGER_F` adds the function name.
+
+```cpp
+class Service {
 public:
-  void showLogs() {
-    LOGGER_C(LOGLEVELL::ALWAYS, "This is ALWAYS level");
-    LOGGER_C(LOGLEVELL::FATAL, "This is FATAL level");
-    LOGGER_C(LOGLEVELL::ERROR, "This is ERROR level");
-    LOGGER_C(LOGLEVELL::WARN, "This is WARN level");
-    LOGGER_C(LOGLEVELL::INFO, "This is INFO level");
-    LOGGER_C(LOGLEVELL::DEBUG, "This is DEBUG level");
-    LOGGER_C(LOGLEVELL::VERBOSE, "This is VERBOSE level");
+  void start() {
+    LOGGER_C(LogLevel::INFO, "Service started");
+  }
+};
+```
+
+On GCC and Clang, class names are demangled. Other compilers use the name
+provided by `typeid` without depending on the non-portable `<cxxabi.h>` API.
+
+## File and memory sinks
+
+```cpp
+LOGGER.addFileSink("application.log");
+
+std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
+LOGGER_F(LogLevel::INFO, "Stored by every active sink");
+
+for (const std::string &entry : memory->getLogs())
+  std::cout << entry << '\n';
+```
+
+`setFileOutput()` remains available as a compatibility alias for
+`addFileSink()`. Both append a sink; they do not replace existing sinks.
+
+Memory access returns a snapshot, so callers never retain an unlocked reference
+to the sink's internal storage.
+
+## Filtering selected levels
+
+The threshold and whitelist are both applied:
+
+```cpp
+LOGGER.setLogLevel(LogLevel::DEBUG);
+LOGGER.setFilterLevels({LogLevel::ERROR, LogLevel::WARN});
+
+LOGGER_F(LogLevel::DEBUG, "Filtered out");
+LOGGER_F(LogLevel::ERROR, "Allowed");
+
+LOGGER.clearFilterLevels();
+```
+
+## Custom colors
+
+```cpp
+LOGGER.setLevelColor(LogLevel::INFO, Color::CYAN);
+LOGGER_F(LogLevel::INFO, "Cyan console message");
+```
+
+Colors are owned as strings by the logger. File and memory sinks receive plain
+text without ANSI escape sequences.
+
+## Temporary settings
+
+Prefer the scoped API. It restores the level, filter, colors, sinks, and memory
+sink even when code exits early or throws an exception:
+
+```cpp
+{
+  ScopedSettings temporary = LOGGER.scopedSettings();
+  LOGGER.setLogLevel(LogLevel::ERROR);
+  LOGGER.setFilterLevels({LogLevel::ERROR});
+  LOGGER_F(LogLevel::ERROR, "Temporary configuration");
+}
+```
+
+`pushLogSetting()` and `popLogSetting()` remain available for compatibility.
+Settings affect the process-wide default logger, so overlapping settings scopes
+should be coordinated by the application.
+
+## Custom sinks
+
+Implement the string method for a simple sink:
+
+```cpp
+class MySink : public LogSink {
+public:
+  void write(const std::string &message) override {
+    // Store or send the plain formatted message.
   }
 };
 
-int main() {
-  LOGGER.setLogLevel(LOGLEVELL::VERBOSE);
-
-  LOGGER_F(LOGLEVELL::INFO, "Calling ColorDemo::showLogs()");
-  ColorDemo demo;
-  demo.showLogs();
-
-  LOGGER_F(LOGLEVELL::INFO, "End of demo");
-  return 0;
-}
+LOGGER.addSink(std::make_shared<MySink>());
 ```
 
-Expected Output:
+A sink that needs the level or selected color can additionally override
+`write(const LogEntry&)`. The logger passes structured entries directly; sinks
+do not parse formatted text to recover the level.
 
-<img src="sample_output.png" alt="Colored log screenshot" width="50%">
+## Isolated logger instances
 
-
-## Advanced Features
-
-### In-Memory Logging
+Macros use the process-wide default logger. Tests and independent components
+can construct a separate logger instead:
 
 ```cpp
-LOGGER.enableInMemorySink();
-LOGGER.setLogLevel(LOGLEVELL::INFO);
-LOGGER_F(LOGLEVELL::INFO, "Captured to memory");
-
-for (const auto& log : LOGGER.getInMemoryLogs()) {
-    std::cout << "[MEM] " << log << std::endl;
-}
+Logger logger(false); // false means no default console sink
+logger.addSink(std::make_shared<MySink>());
+logger.log(LogLevel::INFO, "message", "functionName");
 ```
 
-### Filter Specific Levels
+Messages can be strings or any value supported by `operator<<`.
 
-```cpp
-LOGGER.setLogLevel(LOGLEVELL::DEBUG);
-LOGGER.setFilterLevels({ LOGLEVELL::ERROR, LOGLEVELL::WARN });
-
-LOGGER_F(LOGLEVELL::DEBUG, "Filtered out");
-LOGGER_F(LOGLEVELL::ERROR, "Allowed");
-```
-
-### Color Customization
-
-```cpp
-LOGGER.setLevelColor(LOGLEVELL::INFO, Color::CYAN);
-LOGGER_F(LOGLEVELL::INFO, "This will be cyan in console");
-```
-
-### Scoped Logger Settings (Push/Pop)
-
-```cpp
-LOGGER.setLogLevel(LOGLEVELL::INFO);
-LOGGER_F(LOGLEVELL::DEBUG, "This won't show");
-
-LOGGER.pushLogSetting();
-LOGGER.setLogLevel(LOGLEVELL::DEBUG);
-LOGGER_F(LOGLEVELL::DEBUG, "This debug will show");
-LOGGER.popLogSetting();
-
-LOGGER_F(LOGLEVELL::DEBUG, "Debug again filtered out");
-```
-
-### File Logging
-
-```cpp
-LOGGER.setFileOutput("output.log");
-LOGGER.setLogLevel(LOGLEVELL::INFO);
-LOGGER_F(LOGLEVELL::INFO, "This is written to the file");
-```
-
-## Integration
-
-### Method 1: Direct Include
-1. Copy the `include/cppColorLogger` directory to your project
-2. Add the parent directory to your include path
-3. Include the header: `#include "cppColorLogger/logger.h"`
-
-### Method 2: CMake Subproject
-1. Add this repository as a submodule or copy it to your project
-2. Add the following to your CMakeLists.txt:
-```cmake
-add_subdirectory(CppColorLogger)
-target_link_libraries(your_target PRIVATE cppColorLogger)
-```
-3. Include the header: `#include "cppColorLogger/logger.h"`
-3. Initialize logger (optional, done automatically):
-```cpp
-auto& logger = LOGGER::getInstance();
-logger.setLogLevel(LOGLEVELL::DEBUG);  // Optional: Set default level
-```
-
-## Using in Your CMake Project
-
-Since this is a header-only library, you can simply add the include directory to your project:
+## CMake integration
 
 ```cmake
-# In your CMakeLists.txt
-include_directories(path/to/CppColorLogger/include)
+add_subdirectory(path/to/CppColorLogger)
+target_link_libraries(your_target PRIVATE CppColorLogger::cppColorLogger)
 ```
 
-Or, if you want to make it available system-wide:
+Then include:
 
-```cmake
-# Install headers
-install(DIRECTORY include/cppColorLogger DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+```cpp
+#include "cppColorLogger/logger.h"
 ```
 
-## Thread Safety
+The install step exports the header and CMake target.
 
-All operations are thread-safe. The logger uses:
-- Atomic operations for log levels
-- Mutex protection for sinks and color maps
-- Lock-free reading for performance
+## Compatibility
+
+Existing code using the original misspelled `LOGLEVELL` name still compiles:
+
+```cpp
+LOGGER_F(LOGLEVELL::INFO, "Compatible with the original API");
+```
+
+New code should use `LogLevel`.
+
+## Thread safety
+
+Configuration is copied under a state mutex, then released before output I/O.
+Output dispatch is serialized to keep complete entries ordered across sinks.
+File and memory sinks also protect their own state. Memory logs are returned by
+value as safe snapshots.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See [LICENSE](LICENSE).

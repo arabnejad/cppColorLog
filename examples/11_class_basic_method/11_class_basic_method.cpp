@@ -4,14 +4,14 @@
 class Service {
 public:
   void start() {
-    LOGGER_C(LOGLEVELL::INFO, "Service started");
-    LOGGER_C(LOGLEVELL::DEBUG, "Internal state initialized");
+    LOGGER_C(LogLevel::INFO, "Service started");
+    LOGGER_C(LogLevel::DEBUG, "Internal state initialized");
   }
 };
 
 int main() {
   printf("Example 11: Basic class method logging using LOGGER_C.\n");
-  LOGGER.setLogLevel(LOGLEVELL::DEBUG);
+  LOGGER.setLogLevel(LogLevel::DEBUG);
   Service s;
   s.start();
   return 0;

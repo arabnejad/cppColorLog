@@ -3,19 +3,19 @@
 
 void logTemporarilyWithErrorOnly() {
   LOGGER.pushLogSetting();
-  LOGGER.setLogLevel(LOGLEVELL::ERROR);
-  LOGGER.setFilterLevels({LOGLEVELL::ERROR});
+  LOGGER.setLogLevel(LogLevel::ERROR);
+  LOGGER.setFilterLevels({LogLevel::ERROR});
 
-  LOGGER_F(LOGLEVELL::INFO, "This info log is hidden due to temp settings");
-  LOGGER_F(LOGLEVELL::ERROR, "This error is visible inside push scope");
+  LOGGER_F(LogLevel::INFO, "This info log is hidden due to temp settings");
+  LOGGER_F(LogLevel::ERROR, "This error is visible inside push scope");
   LOGGER.popLogSetting();
 }
 
 int main() {
   printf("Example 09: Push and pop logger settings for temporary logging behavior.\n");
-  LOGGER.setLogLevel(LOGLEVELL::INFO);
-  LOGGER_F(LOGLEVELL::INFO, "Info before scope");
+  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER_F(LogLevel::INFO, "Info before scope");
   logTemporarilyWithErrorOnly();
-  LOGGER_F(LOGLEVELL::INFO, "Info after scope");
+  LOGGER_F(LogLevel::INFO, "Info after scope");
   return 0;
 }
