@@ -4,19 +4,19 @@
 class Base {
 public:
   virtual void logBase() {
-    LOGGER_C(LogLevel::INFO, "Base class log");
+    LOGGER_LOG(LogLevel::INFO, "Base class log");
   }
 };
 
 class Derived : public Base {
 public:
   void logBase() override {
-    LOGGER_C(LogLevel::INFO, "Derived override log");
+    LOGGER_LOG(LogLevel::INFO, "Derived override log");
   }
 };
 
 int main() {
-  printf("Example 13: Inheritance with LOGGER_C in overridden class methods.\n");
+  printf("Example 13: Automatic context in overridden class methods.\n");
   LOGGER.setLogLevel(LogLevel::INFO);
   Derived derived;
   Base   &object = derived;

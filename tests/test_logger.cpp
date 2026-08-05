@@ -13,6 +13,20 @@
 int multiTranslationUnitA();
 int multiTranslationUnitB();
 
+// These names and messages intentionally match the quick-start documentation.
+// Keeping them outside the anonymous namespace makes the expected context
+// exactly `refreshCache` and `Service::start` on supported compilers.
+void refreshCache() {
+  LOGGER_LOG(LogLevel::INFO, "Cache refreshed");
+}
+
+class Service {
+public:
+  void start() {
+    LOGGER_LOG(LogLevel::INFO, "Service started");
+  }
+};
+
 namespace {
 
 class LoggerTest : public ::testing::Test {
@@ -89,6 +103,48 @@ class ContextExample {
 public:
   void emit() {
     LOGGER_C(LogLevel::INFO, "Class context");
+  }
+};
+
+void logFromAutomaticFreeFunction() {
+  LOGGER_LOG(LogLevel::INFO, "Automatic free function");
+}
+
+template <typename T> void logFromAutomaticFunctionTemplate(const T &value) {
+  LOGGER_LOG(LogLevel::INFO, value);
+}
+
+class AutomaticContextExample {
+public:
+  AutomaticContextExample() {
+    LOGGER_LOG(LogLevel::INFO, "Automatic constructor");
+  }
+
+  ~AutomaticContextExample() {
+    LOGGER_LOG(LogLevel::INFO, "Automatic destructor");
+  }
+
+  void member() {
+    LOGGER_LOG(LogLevel::INFO, "Automatic member");
+  }
+
+  static void staticMember() {
+    LOGGER_LOG(LogLevel::INFO, "Automatic static member");
+  }
+
+  template <typename T> void write(const T &value) {
+    LOGGER_LOG(LogLevel::INFO, value);
+  }
+
+  void operator()() {
+    LOGGER_LOG(LogLevel::INFO, "Automatic operator");
+  }
+};
+
+template <typename T> class AutomaticRepository {
+public:
+  void save(const T &) {
+    LOGGER_LOG(LogLevel::INFO, "Automatic class template");
   }
 };
 
@@ -200,6 +256,74 @@ TEST_F(LoggerTest, OutputContainsTimestampAndClassContext) {
   EXPECT_NE(output.find("ContextExample::emit]"), std::string::npos);
 }
 
+TEST_F(LoggerTest, UnifiedMacroDetectsFreeAndMemberFunctions) {
+  logFromAutomaticFreeFunction();
+  {
+    AutomaticContextExample example;
+    example.member();
+    AutomaticContextExample::staticMember();
+    example();
+  }
+
+  const std::string output = capturedCout.str();
+  EXPECT_NE(output.find("logFromAutomaticFreeFunction]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::AutomaticContextExample]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::member]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::staticMember]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::operator()]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::~AutomaticContextExample]"), std::string::npos);
+}
+
+TEST_F(LoggerTest, UnifiedMacroDetectsTemplateContexts) {
+  logFromAutomaticFunctionTemplate(42);
+  AutomaticContextExample example;
+  example.write(42);
+  AutomaticRepository<int> repository;
+  repository.save(42);
+
+  const std::string output = capturedCout.str();
+  EXPECT_NE(output.find("logFromAutomaticFunctionTemplate<int>]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticContextExample::write<int>]"), std::string::npos);
+  EXPECT_NE(output.find("AutomaticRepository<int>::save]"), std::string::npos) << output;
+}
+
+TEST_F(LoggerTest, UnifiedMacroUsesStableLambdaLabelOrExplicitContext) {
+  const auto        automatic = [] { LOGGER_LOG(LogLevel::INFO, "Automatic lambda"); };
+  const std::string context   = "RequestHandler::onResponse";
+  const auto        named     = [&context] { LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, context, "Explicit lambda"); };
+
+  automatic();
+  named();
+
+  const std::string output = capturedCout.str();
+  EXPECT_NE(output.find("[<lambda>] Automatic lambda"), std::string::npos) << output;
+  EXPECT_NE(output.find("[RequestHandler::onResponse] Explicit lambda"), std::string::npos);
+}
+
+TEST_F(LoggerTest, DocumentationExamplesProduceTheirDisplayedContextAndMessage) {
+  const std::shared_ptr<InMemorySink> sink = LOGGER.enableInMemorySink();
+
+  refreshCache();
+  Service service;
+  service.start();
+
+  const auto automaticLambda = []() { LOGGER_LOG(LogLevel::INFO, "Cache refreshed"); };
+  automaticLambda();
+
+  const auto namedLambda = []() { LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "refreshCache", "Cache refreshed"); };
+  namedLambda();
+
+  LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "UserRepository::save", "Saving user");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 5U);
+  EXPECT_NE(logs[0].find("[refreshCache] Cache refreshed"), std::string::npos);
+  EXPECT_NE(logs[1].find("[Service::start] Service started"), std::string::npos);
+  EXPECT_NE(logs[2].find("[<lambda>] Cache refreshed"), std::string::npos);
+  EXPECT_NE(logs[3].find("[refreshCache] Cache refreshed"), std::string::npos);
+  EXPECT_NE(logs[4].find("[UserRepository::save] Saving user"), std::string::npos);
+}
+
 TEST(LoggerDesignTest, PublicCustomSinkReceivesMessages) {
   Logger                               logger(false);
   const std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
@@ -291,6 +415,143 @@ TEST(LoggerDesignTest, OriginalLogLevelNameRemainsCompatible) {
   EXPECT_EQ(sink->getLogs().size(), 1U);
 }
 
+TEST(LoggerDesignTest, SignatureParserHandlesSupportedCompilerFormats) {
+  using cppcolorlog::detail::normalizeFunctionSignature;
+
+  EXPECT_EQ(normalizeFunctionSignature("void Service::start()", "start"), "Service::start");
+  EXPECT_EQ(normalizeFunctionSignature("void process(const T&) [with T = int]", "process"), "process<int>");
+  EXPECT_EQ(normalizeFunctionSignature("void Serializer::write(const T&) [T = int]", "write"),
+            "Serializer::write<int>");
+  EXPECT_EQ(normalizeFunctionSignature("void Repository<T>::save(const T&) [with T = User]", "save"),
+            "Repository<User>::save");
+  EXPECT_EQ(normalizeFunctionSignature("void Repository<T>::convert(const U&) [with U = std::vector<int>; T = User]",
+                                       "convert"),
+            "Repository<User>::convert<std::vector<int>>");
+  EXPECT_EQ(normalizeFunctionSignature("void Repository<User>::convert(const U&) [U = std::pair<int, int>, T = User]",
+                                       "convert"),
+            "Repository<User>::convert<std::pair<int, int>>");
+  EXPECT_EQ(normalizeFunctionSignature("void Functor::operator()()", "operator()"), "Functor::operator()");
+  EXPECT_EQ(normalizeFunctionSignature("Value Value::operator<<(int)", "operator<<"), "Value::operator<<");
+  EXPECT_EQ(normalizeFunctionSignature("public: void __cdecl Service::start(void)", "start"), "Service::start");
+  EXPECT_EQ(normalizeFunctionSignature("public: __cdecl Service::Service(void)", "Service"), "Service::Service");
+  EXPECT_EQ(normalizeFunctionSignature("void __cdecl `anonymous namespace'::Service::start(void)", "start"),
+            "`anonymous namespace'::Service::start");
+  EXPECT_EQ(normalizeFunctionSignature("public: bool __cdecl Value::operator bool(void) const", "operator bool"),
+            "Value::operator bool");
+}
+
+TEST(LoggerDesignTest, TrimHelperRemovesOnlySurroundingWhitespace) {
+  using cppcolorlog::detail::trim;
+
+  EXPECT_EQ(trim("  void run()  "), "void run()");
+  EXPECT_EQ(trim("\tvalue\n"), "value");
+  EXPECT_EQ(trim("   "), "");
+}
+
+TEST(LoggerDesignTest, IdentifierCharacterHelperRecognizesNameCharacters) {
+  using cppcolorlog::detail::isIdentifierCharacter;
+
+  EXPECT_TRUE(isIdentifierCharacter('A'));
+  EXPECT_TRUE(isIdentifierCharacter('7'));
+  EXPECT_TRUE(isIdentifierCharacter('_'));
+  EXPECT_FALSE(isIdentifierCharacter('-'));
+}
+
+TEST(LoggerDesignTest, IdentifierHelperAcceptsOnlySimpleCppNames) {
+  using cppcolorlog::detail::isIdentifier;
+
+  EXPECT_TRUE(isIdentifier("T"));
+  EXPECT_TRUE(isIdentifier("value_1"));
+  EXPECT_FALSE(isIdentifier(""));
+  EXPECT_FALSE(isIdentifier("7value"));
+  EXPECT_FALSE(isIdentifier("std::string"));
+  EXPECT_FALSE(isIdentifier("const T"));
+}
+
+TEST(LoggerDesignTest, SplitTemplateBindingsHelperPreservesNestedCommas) {
+  using cppcolorlog::detail::splitTemplateBindings;
+
+  const std::vector<std::string> clangBindings = splitTemplateBindings("U = std::pair<int, int>, T = User");
+  ASSERT_EQ(clangBindings.size(), 2U);
+  EXPECT_EQ(clangBindings[0], "U = std::pair<int, int>");
+  EXPECT_EQ(clangBindings[1], "T = User");
+
+  const std::vector<std::string> gccBindings = splitTemplateBindings("U = std::vector<int>; T = User");
+  ASSERT_EQ(gccBindings.size(), 2U);
+  EXPECT_EQ(gccBindings[0], "U = std::vector<int>");
+  EXPECT_EQ(gccBindings[1], "T = User");
+}
+
+TEST(LoggerDesignTest, TemplateBindingStoresNameAndResolvedValue) {
+  const cppcolorlog::detail::TemplateBinding binding = {"T", "User"};
+
+  EXPECT_EQ(binding.name, "T");
+  EXPECT_EQ(binding.value, "User");
+}
+
+TEST(LoggerDesignTest, RemoveTemplateSuffixHelperSeparatesSignatureAndBindings) {
+  using cppcolorlog::detail::removeTemplateSuffix;
+
+  std::string                                             signature = "void process(T) [with T = int]";
+  const std::vector<cppcolorlog::detail::TemplateBinding> bindings  = removeTemplateSuffix(signature);
+
+  EXPECT_EQ(signature, "void process(T)");
+  ASSERT_EQ(bindings.size(), 1U);
+  EXPECT_EQ(bindings[0].name, "T");
+  EXPECT_EQ(bindings[0].value, "int");
+}
+
+TEST(LoggerDesignTest, ReplaceIdentifierHelperChangesOnlyCompleteTokens) {
+  using cppcolorlog::detail::replaceIdentifier;
+
+  std::string text = "Repository<T>::save";
+  EXPECT_TRUE(replaceIdentifier(text, "T", "User"));
+  EXPECT_EQ(text, "Repository<User>::save");
+
+  std::string longerName = "Type";
+  EXPECT_FALSE(replaceIdentifier(longerName, "T", "User"));
+  EXPECT_EQ(longerName, "Type");
+  EXPECT_FALSE(replaceIdentifier(text, "Missing", "Value"));
+}
+
+TEST(LoggerDesignTest, FindNameStartHelperKeepsConversionOperatorName) {
+  using cppcolorlog::detail::findNameStart;
+
+  const std::string            prefix    = "public: bool __cdecl Value::operator bool";
+  const std::string::size_type opStart   = prefix.rfind("operator");
+  const std::string::size_type nameStart = findNameStart(prefix, opStart);
+
+  EXPECT_EQ(prefix.substr(nameStart), "Value::operator bool");
+}
+
+TEST(LoggerDesignTest, ConsumeClassTemplateArgumentHelperFindsResolvedClassType) {
+  using cppcolorlog::detail::consumeClassTemplateArgument;
+
+  std::string classQualifier = "Repository<User>";
+  EXPECT_TRUE(consumeClassTemplateArgument(classQualifier, "User"));
+  EXPECT_EQ(classQualifier, "Repository<####>");
+  EXPECT_FALSE(consumeClassTemplateArgument(classQualifier, "User"));
+  EXPECT_FALSE(consumeClassTemplateArgument(classQualifier, "Missing"));
+}
+
+TEST(LoggerDesignTest, ExtractFunctionNameHelperRemovesDeclarationDetails) {
+  using cppcolorlog::detail::extractFunctionName;
+
+  EXPECT_EQ(extractFunctionName("void Service::start(int)", "start"), "Service::start");
+  EXPECT_EQ(extractFunctionName("bool Predicate::operator()(int) const", "operator()"), "Predicate::operator()");
+  EXPECT_EQ(extractFunctionName("main()::<lambda()>", "operator()"), "<lambda>");
+  EXPECT_EQ(extractFunctionName("", "fallback"), "fallback");
+}
+
+TEST(LoggerDesignTest, SignatureParserHandlesFallbackAndLambda) {
+  using cppcolorlog::detail::normalizeFunctionSignature;
+
+  EXPECT_EQ(normalizeFunctionSignature("void process(T) [with T = int]", "process"), "process<int>");
+  EXPECT_EQ(normalizeFunctionSignature("unsupportedFunction", "unsupportedFunction"), "unsupportedFunction");
+  EXPECT_EQ(normalizeFunctionSignature("main()::<lambda()>", "operator()"), "<lambda>");
+  EXPECT_EQ(normalizeFunctionSignature("", "fallbackFunction"), "fallbackFunction");
+}
+
 TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
@@ -300,7 +561,7 @@ TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
   const int                messagesPerThread = 100;
   std::vector<std::thread> threads;
   for (int thread = 0; thread < threadCount; ++thread) {
-    threads.push_back(std::thread([&logger, messagesPerThread]() {
+    threads.push_back(std::thread([&logger]() {
       for (int message = 0; message < messagesPerThread; ++message)
         logger.log(LogLevel::DEBUG, message, "worker");
     }));

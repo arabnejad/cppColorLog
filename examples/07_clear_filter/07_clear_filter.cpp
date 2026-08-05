@@ -6,6 +6,6 @@ int main() {
   LOGGER.setLogLevel(LogLevel::DEBUG);
   LOGGER.setFilterLevels({LogLevel::ERROR});
   LOGGER.clearFilterLevels();
-  LOGGER_F(LogLevel::DEBUG, "Filter cleared, debug log now shown");
+  LOGGER_LOG(LogLevel::DEBUG, "Filter cleared, debug log now shown");
   return 0;
 }

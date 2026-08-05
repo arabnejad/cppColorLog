@@ -8,8 +8,8 @@ public:
     LOGGER.setLogLevel(LogLevel::ERROR);
     LOGGER.setFilterLevels({LogLevel::ERROR});
 
-    LOGGER_C(LogLevel::INFO, "Filtered out");
-    LOGGER_C(LogLevel::ERROR, "Logged inside scoped setting");
+    LOGGER_LOG(LogLevel::INFO, "Filtered out");
+    LOGGER_LOG(LogLevel::ERROR, "Logged inside scoped setting");
   }
 };
 
@@ -18,6 +18,6 @@ int main() {
   LOGGER.setLogLevel(LogLevel::INFO);
   Processor p;
   p.process();
-  LOGGER_F(LogLevel::INFO, "Back to normal settings");
+  LOGGER_LOG(LogLevel::INFO, "Back to normal settings");
   return 0;
 }

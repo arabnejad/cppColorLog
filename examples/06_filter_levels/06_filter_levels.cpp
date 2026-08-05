@@ -6,8 +6,8 @@ int main() {
   LOGGER.setLogLevel(LogLevel::DEBUG);
   LOGGER.setFilterLevels({LogLevel::WARN, LogLevel::ERROR});
 
-  LOGGER_F(LogLevel::DEBUG, "Filtered out debug log");
-  LOGGER_F(LogLevel::WARN, "This is a warning");
-  LOGGER_F(LogLevel::ERROR, "This is an error");
+  LOGGER_LOG(LogLevel::DEBUG, "Filtered out debug log");
+  LOGGER_LOG(LogLevel::WARN, "This is a warning");
+  LOGGER_LOG(LogLevel::ERROR, "This is an error");
   return 0;
 }

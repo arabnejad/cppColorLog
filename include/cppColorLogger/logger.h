@@ -2,6 +2,7 @@
 #define CPPCOLORLOGGER_LOGGER_H
 
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <ctime>
@@ -66,6 +67,420 @@ inline std::string demangle(const char *name) {
   return name;
 #endif
 }
+
+/**
+ * @namespace detail
+ * @brief Private helpers that shorten a compiler function signature for logs.
+ *
+ * Application developers do not call anything in this namespace. Use
+ * LOGGER_LOG for automatic context or LOGGER_LOG_WITH_CONTEXT to provide your
+ * own context. The logger calls these helpers internally.
+ *
+ * A compiler describes a method using a long string such as
+ * `void Service::start(int)`. The log only needs `Service::start`. The helpers
+ * below remove the unwanted pieces in small, testable steps. Template
+ * functions need a few extra steps because GCC and Clang place their resolved
+ * types at the end of the string.
+ *
+ * See `docs/source_context_parser.md` for a beginner-friendly walkthrough.
+ */
+namespace detail {
+
+/**
+ * @brief Removes spaces, tabs, and newlines from the two ends of a string.
+ *
+ * Example: `"  void run()  "` becomes `"void run()"`.
+ *
+ * @param value The string to clean. It is not modified.
+ * @return A new string without surrounding whitespace.
+ */
+inline std::string trim(const std::string &value) {
+  const std::string::size_type first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos)
+    return std::string();
+  const std::string::size_type last = value.find_last_not_of(" \t\r\n");
+  return value.substr(first, last - first + 1);
+}
+
+/**
+ * @brief Checks whether a character can be part of a C++ name.
+ *
+ * Letters, digits, and `_` return true. This helper is used to recognize where
+ * one name ends and the next piece of text begins.
+ *
+ * @param character The character to check.
+ * @return True for a letter, digit, or underscore; otherwise false.
+ */
+inline bool isIdentifierCharacter(char character) {
+  const unsigned char value = static_cast<unsigned char>(character);
+  return std::isalnum(value) != 0 || character == '_';
+}
+
+/**
+ * @brief Checks whether a complete string is one simple C++ name.
+ *
+ * `T` and `value_type` are accepted. Qualified names and complete types such
+ * as `std::string` and `const T` are rejected. The parser only accepts simple
+ * names here because it later uses them as safe find-and-replace tokens.
+ *
+ * @param value The possible identifier.
+ * @return True when value starts with a letter or `_` and every remaining
+ * character is a letter, digit, or `_`.
+ */
+inline bool isIdentifier(const std::string &value) {
+  if (value.empty() || (!std::isalpha(static_cast<unsigned char>(value[0])) && value[0] != '_'))
+    return false;
+  for (std::string::size_type index = 1; index < value.size(); ++index) {
+    if (!isIdentifierCharacter(value[index]))
+      return false;
+  }
+  return true;
+}
+
+/**
+ * @brief Splits a compiler's list of resolved template types.
+ *
+ * GCC separates items with `;`, while Clang commonly uses `,`. A comma inside
+ * a type is not a separator. For example:
+ *
+ * Input:  `U = std::pair<int, int>, T = User`
+ * Output: `["U = std::pair<int, int>", "T = User"]`
+ *
+ * The angle, parenthesis, square-bracket, and brace depth counters tell the
+ * function whether a separator is inside a nested C++ expression. Only a
+ * separator at depth zero starts a new item.
+ *
+ * @param bindings The text inside the compiler's final `[with ...]` or `[...]`.
+ * @return One string for each top-level template binding.
+ */
+inline std::vector<std::string> splitTemplateBindings(const std::string &bindings) {
+  std::vector<std::string> parts;
+  std::string::size_type   start            = 0;
+  int                      angleDepth       = 0;
+  int                      parenthesisDepth = 0;
+  int                      bracketDepth     = 0;
+  int                      braceDepth       = 0;
+
+  // Walk from left to right and remember which kind of nested expression is
+  // currently open. A comma in `pair<int, int>` must not split the list.
+  for (std::string::size_type index = 0; index < bindings.size(); ++index) {
+    const char character = bindings[index];
+    if (character == '<')
+      ++angleDepth;
+    else if (character == '>' && angleDepth > 0)
+      --angleDepth;
+    else if (character == '(')
+      ++parenthesisDepth;
+    else if (character == ')' && parenthesisDepth > 0)
+      --parenthesisDepth;
+    else if (character == '[')
+      ++bracketDepth;
+    else if (character == ']' && bracketDepth > 0)
+      --bracketDepth;
+    else if (character == '{')
+      ++braceDepth;
+    else if (character == '}' && braceDepth > 0)
+      --braceDepth;
+
+    const bool atTopLevel = angleDepth == 0 && parenthesisDepth == 0 && bracketDepth == 0 && braceDepth == 0;
+    if (atTopLevel && (character == ';' || character == ',')) {
+      parts.push_back(trim(bindings.substr(start, index - start)));
+      start = index + 1;
+    }
+  }
+
+  parts.push_back(trim(bindings.substr(start)));
+  return parts;
+}
+
+/**
+ * @brief One template name and the real type selected for it.
+ *
+ * For `template <typename T>` instantiated with `User`, name is `T` and value
+ * is `User`.
+ */
+struct TemplateBinding {
+  std::string name;  ///< The placeholder written in the template, for example `T`.
+  std::string value; ///< The resolved compiler type, for example `User`.
+};
+
+/**
+ * @brief Separates the callable signature from its resolved template types.
+ *
+ * GCC and Clang add template information to the end of a signature:
+ *
+ * Input signature:  `void parse(T) [with T = int]`
+ * Changed signature: `void parse(T)`
+ * Return value:      `[{name: "T", value: "int"}]`
+ *
+ * Clang's shorter `[T = int]` form is handled in the same way. A signature with
+ * no valid suffix is left unchanged and produces an empty vector.
+ *
+ * @param signature The signature to inspect. The recognized suffix is removed
+ * from this same string, which is why the parameter is a non-const reference.
+ * @return The valid template name/value pairs found in the suffix.
+ */
+inline std::vector<TemplateBinding> removeTemplateSuffix(std::string &signature) {
+  std::vector<TemplateBinding> result;
+  const std::string::size_type suffixStart = signature.rfind(" [");
+  if (suffixStart == std::string::npos || signature.empty() || signature[signature.size() - 1] != ']')
+    return result;
+
+  // Keep only the text between the final square brackets.
+  std::string bindings = signature.substr(suffixStart + 2, signature.size() - suffixStart - 3);
+  if (bindings.compare(0, 5, "with ") == 0)
+    bindings.erase(0, 5);
+  if (bindings.find('=') == std::string::npos)
+    return result;
+
+  // The caller will parse the function part and template bindings separately.
+  signature.erase(suffixStart);
+  const std::vector<std::string> parts = splitTemplateBindings(bindings);
+  for (std::vector<std::string>::const_iterator part = parts.begin(); part != parts.end(); ++part) {
+    const std::string::size_type equals = part->find('=');
+    if (equals == std::string::npos)
+      continue;
+
+    const std::string name  = trim(part->substr(0, equals));
+    const std::string value = trim(part->substr(equals + 1));
+    if (isIdentifier(name) && !value.empty())
+      result.push_back(TemplateBinding{name, value});
+  }
+  return result;
+}
+
+/**
+ * @brief Replaces a template name without changing longer names that contain it.
+ *
+ * Example: replacing `T` with `User` in `Repository<T>::save` produces
+ * `Repository<User>::save`. The `T` at the start of `Type` is not a complete
+ * token, so `Type` would remain unchanged.
+ *
+ * @param text The string to update in place.
+ * @param identifier The complete name to find, such as `T`.
+ * @param replacement The text that replaces it, such as `User`.
+ * @return True if at least one replacement was made.
+ */
+inline bool replaceIdentifier(std::string &text, const std::string &identifier, const std::string &replacement) {
+  bool                   replaced = false;
+  std::string::size_type position = 0;
+  while ((position = text.find(identifier, position)) != std::string::npos) {
+    const bool                   validStart = position == 0 || !isIdentifierCharacter(text[position - 1]);
+    const std::string::size_type end        = position + identifier.size();
+    const bool                   validEnd   = end == text.size() || !isIdentifierCharacter(text[end]);
+    if (validStart && validEnd) {
+      text.replace(position, identifier.size(), replacement);
+      position += replacement.size();
+      replaced = true;
+    } else {
+      position = end;
+    }
+  }
+  return replaced;
+}
+
+/**
+ * @brief Finds where a function name starts in the text before its arguments.
+ *
+ * This helper is mainly needed for operators, whose names can contain spaces.
+ * It searches backward from end until it finds a space that belongs to the
+ * declaration rather than to a nested template or operator name.
+ *
+ * Example text: `public: bool __cdecl Value::operator bool`
+ * Result points to:                     `Value::operator bool`
+ *
+ * @param prefix The part of a signature before its function argument list.
+ * @param end The position where the backward search starts. For an operator,
+ * this is the position of the word `operator`.
+ * @return The index of the first character in the qualified callable name.
+ */
+inline std::string::size_type findNameStart(const std::string &prefix, std::string::size_type end) {
+  int  angleDepth       = 0;
+  int  parenthesisDepth = 0;
+  bool inMsvcQuotedName = false;
+  // Search backward because the callable name is the final part of prefix.
+  // Depth values prevent spaces inside nested syntax from ending the search.
+  for (std::string::size_type index = end; index > 0; --index) {
+    const char character = prefix[index - 1];
+    if (character == '\'')
+      inMsvcQuotedName = true;
+    else if (character == '`')
+      inMsvcQuotedName = false;
+    else if (character == '>')
+      ++angleDepth;
+    else if (character == '<' && angleDepth > 0)
+      --angleDepth;
+    else if (character == ')')
+      ++parenthesisDepth;
+    else if (character == '(' && parenthesisDepth > 0)
+      --parenthesisDepth;
+    else if ((character == ' ' || character == '\t') && angleDepth == 0 && parenthesisDepth == 0 && !inMsvcQuotedName)
+      return index;
+  }
+  return 0;
+}
+
+/**
+ * @brief Detects a resolved type that is already present in the class name.
+ *
+ * Consider `Repository<User>::save() [T = User]`. The type `User` is already
+ * visible in `Repository<User>`, so it must not also be appended to the method
+ * as `save<User>`.
+ *
+ * The function searches only between `<` and `>`. When it finds the argument,
+ * it replaces those characters with `#` in the working copy. This does not
+ * affect the final displayed name; it only prevents the same occurrence from
+ * being matched twice.
+ *
+ * @param classQualifier A temporary copy of the class part, such as
+ * `Repository<User>`. It may be marked with `#` characters.
+ * @param argument The resolved type to find, such as `User`.
+ * @return True if argument was found inside class template brackets.
+ */
+inline bool consumeClassTemplateArgument(std::string &classQualifier, const std::string &argument) {
+  if (classQualifier.find('<') == std::string::npos || argument.empty())
+    return false;
+
+  std::string::size_type position = 0;
+  while ((position = classQualifier.find(argument, position)) != std::string::npos) {
+    // Determine whether this occurrence is between `<` and `>`.
+    int angleDepth = 0;
+    for (std::string::size_type index = 0; index < position; ++index) {
+      if (classQualifier[index] == '<')
+        ++angleDepth;
+      else if (classQualifier[index] == '>' && angleDepth > 0)
+        --angleDepth;
+    }
+    if (angleDepth > 0) {
+      classQualifier.replace(position, argument.size(), argument.size(), '#');
+      return true;
+    }
+    position += argument.size();
+  }
+  return false;
+}
+
+/**
+ * @brief Removes everything except the class and callable name.
+ *
+ * This function handles the shape of the declaration. It does not resolve
+ * template placeholders; normalizeFunctionSignature does that later.
+ *
+ * Input:  `void Service::start(int)`
+ * Output: `Service::start`
+ *
+ * Operators are preserved (`Number::operator()`), and all compiler-specific
+ * lambda spellings are simplified to `<lambda>`.
+ *
+ * @param rawSignature A compiler signature with any `[with ...]` suffix already
+ * removed.
+ * @param fallbackFunction A simple name, normally from `__func__`, to return if
+ * the detailed signature cannot be parsed.
+ * @return The qualified callable name. An already-simple signature is returned
+ * unchanged; fallbackFunction is used when the input is empty or malformed.
+ */
+inline std::string extractFunctionName(const std::string &rawSignature, const std::string &fallbackFunction) {
+  std::string signature = trim(rawSignature);
+  if (signature.empty())
+    return fallbackFunction;
+
+  // GCC, Clang, and MSVC spell lambda functions differently. Do not expose an
+  // unstable compiler-generated name in the log.
+  if (signature.find("lambda") != std::string::npos || signature.find("(anonymous class)") != std::string::npos ||
+      signature.find("::$_") != std::string::npos)
+    return "<lambda>";
+
+  // The last ')' closes the callable's argument list. Scan backward to find
+  // its matching '('; nested parentheses are counted with depth.
+  const std::string::size_type parametersEnd = signature.rfind(')');
+  if (parametersEnd == std::string::npos)
+    return signature;
+
+  int                    depth           = 0;
+  std::string::size_type parametersStart = std::string::npos;
+  for (std::string::size_type index = parametersEnd + 1; index > 0; --index) {
+    const char character = signature[index - 1];
+    if (character == ')')
+      ++depth;
+    else if (character == '(') {
+      --depth;
+      if (depth == 0) {
+        parametersStart = index - 1;
+        break;
+      }
+    }
+  }
+  if (parametersStart == std::string::npos)
+    return fallbackFunction;
+
+  const std::string prefix = trim(signature.substr(0, parametersStart));
+  if (prefix.empty())
+    return fallbackFunction;
+
+  // An operator name can contain punctuation or spaces, so use the dedicated
+  // backward scanner rather than the ordinary last-space rule.
+  const std::string::size_type operatorPosition = prefix.rfind("operator");
+  if (operatorPosition != std::string::npos)
+    return prefix.substr(findNameStart(prefix, operatorPosition));
+
+  // Ordinary functions use the same backward scan, starting at the end.
+  return prefix.substr(findNameStart(prefix, prefix.size()));
+}
+
+/**
+ * @brief Runs the complete parser and returns the context printed in the log.
+ *
+ * LOGGER_LOG calls this function before passing the resulting context to
+ * Logger::log(). It coordinates the smaller helpers in this order:
+ *
+ * 1. Remove and parse the compiler's template suffix.
+ * 2. Extract the class and callable name.
+ * 3. Replace class-template placeholders, such as `Repository<T>`.
+ * 4. Append unused bindings as function-template arguments.
+ *
+ * Example:
+ * `void Repository<T>::convert(U) [with U = int; T = User]`
+ * becomes `Repository<User>::convert<int>`.
+ *
+ * @param rawSignature The complete string supplied by the compiler.
+ * @param fallbackFunction The simple `__func__` name used if parsing fails.
+ * @return A short, readable context for the log entry.
+ */
+inline std::string normalizeFunctionSignature(const std::string &rawSignature,
+                                              const std::string &fallbackFunction = std::string()) {
+  // Step 1: separate the function declaration from template type information.
+  std::string                        signature = trim(rawSignature);
+  const std::vector<TemplateBinding> bindings  = removeTemplateSuffix(signature);
+
+  // Step 2: reduce the declaration to a name such as `Service::start`.
+  std::string                  function = extractFunctionName(signature, fallbackFunction);
+  std::vector<std::string>     functionTemplateArguments;
+  const std::string::size_type memberSeparator = function.rfind("::");
+  std::string                  classTemplateArguments =
+      memberSeparator == std::string::npos ? std::string() : function.substr(0, memberSeparator);
+
+  // Step 3: a binding used in the class name is substituted or marked as
+  // already present. Step 4: every unused binding belongs to the function.
+  for (std::vector<TemplateBinding>::const_iterator binding = bindings.begin(); binding != bindings.end(); ++binding) {
+    if (!replaceIdentifier(function, binding->name, binding->value) &&
+        !consumeClassTemplateArgument(classTemplateArguments, binding->value))
+      functionTemplateArguments.push_back(binding->value);
+  }
+
+  if (!functionTemplateArguments.empty()) {
+    function += '<';
+    for (std::vector<std::string>::size_type index = 0; index < functionTemplateArguments.size(); ++index) {
+      if (index != 0)
+        function += ", ";
+      function += functionTemplateArguments[index];
+    }
+    function += '>';
+  }
+
+  return function.empty() ? fallbackFunction : function;
+}
+
+} // namespace detail
 
 // Sinks receive the rendered text and the metadata needed for output-specific
 // decisions. They never need to parse the formatted message.
@@ -382,7 +797,33 @@ inline std::string demangle(const char *name) {
   return cppcolorlog::demangle(name);
 }
 
+/** The shared logger instance used by the convenience macros. */
 #define LOGGER (::cppcolorlog::defaultLogger())
+
+// Select the most detailed function description available on this compiler.
+// LOGGER_LOG also passes __func__ as a portable fallback.
+#if defined(_MSC_VER)
+#define CPPCOLORLOG_SIGNATURE __FUNCSIG__
+#elif defined(__clang__) || defined(__GNUC__)
+#define CPPCOLORLOG_SIGNATURE __PRETTY_FUNCTION__
+#else
+#define CPPCOLORLOG_SIGNATURE __func__
+#endif
+
+/**
+ * Logs a message and automatically detects its function or class-method name.
+ * Example: LOGGER_LOG(LogLevel::INFO, "Server started");
+ */
+#define LOGGER_LOG(level, message)                                                                                     \
+  ::cppcolorlog::defaultLogger().log(                                                                                  \
+      level, message, ::cppcolorlog::detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__))
+
+/**
+ * Logs with a name chosen by the caller. Prefer this for meaningful lambda
+ * names or context text that must be identical on every compiler.
+ * Example: LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "worker", "Task started");
+ */
+#define LOGGER_LOG_WITH_CONTEXT(level, context, message) ::cppcolorlog::defaultLogger().log(level, message, context)
 #define LOGGER_C(level, message)                                                                                       \
   ::cppcolorlog::defaultLogger().log(level, message, __func__, ::cppcolorlog::demangle(typeid(*this).name()))
 #define LOGGER_F(level, message) ::cppcolorlog::defaultLogger().log(level, message, __func__)

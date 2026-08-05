@@ -4,9 +4,9 @@
 class Engine {
 public:
   void tick() {
-    LOGGER_C(LogLevel::DEBUG, "Tick operation executed");
-    LOGGER_C(LogLevel::INFO, "Tick count updated");
-    LOGGER_C(LogLevel::WARN, "Tick approaching limit");
+    LOGGER_LOG(LogLevel::DEBUG, "Tick operation executed");
+    LOGGER_LOG(LogLevel::INFO, "Tick count updated");
+    LOGGER_LOG(LogLevel::WARN, "Tick approaching limit");
   }
 };
 
