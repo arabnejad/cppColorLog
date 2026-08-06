@@ -9,11 +9,13 @@
 #include <fstream>
 #include <initializer_list>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <typeinfo>
 #include <utility>
 #include <vector>
@@ -588,7 +590,7 @@ public:
   // Public construction enables isolated logger instances in tests and tools.
   explicit Logger(bool addConsoleSink = true) {
     if (addConsoleSink)
-      state_.sinks.push_back(std::make_shared<ConsoleSink>());
+      globalState_.sinks.push_back(std::make_shared<ConsoleSink>());
   }
 
   static Logger &getInstance() {
@@ -601,23 +603,22 @@ public:
 
   void setLogLevel(LogLevel level) {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    state_.logLevel = level;
+    activeStateLocked(std::this_thread::get_id()).logLevel = level;
   }
 
   void setLevelColor(LogLevel level, const std::string &color) {
-    const std::size_t index = levelIndex(level);
-    if (index >= state_.colors.size())
-      return;
-
+    const std::size_t           index = levelIndex(level);
     std::lock_guard<std::mutex> lock(stateMutex_);
-    state_.colors[index] = color;
+    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    if (index < state.colors.size())
+      state.colors[index] = color;
   }
 
   void addSink(const std::shared_ptr<LogSink> &sink) {
     if (!sink)
       return;
     std::lock_guard<std::mutex> lock(stateMutex_);
-    state_.sinks.push_back(sink);
+    activeStateLocked(std::this_thread::get_id()).sinks.push_back(sink);
   }
 
   std::shared_ptr<FileSink> addFileSink(const std::string &filename) {
@@ -633,43 +634,46 @@ public:
 
   std::shared_ptr<InMemorySink> enableInMemorySink() {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    if (!state_.inMemorySink) {
-      state_.inMemorySink = std::make_shared<InMemorySink>();
-      state_.sinks.push_back(state_.inMemorySink);
+    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    if (!state.inMemorySink) {
+      state.inMemorySink = std::make_shared<InMemorySink>();
+      state.sinks.push_back(state.inMemorySink);
     }
-    return state_.inMemorySink;
+    return state.inMemorySink;
   }
 
   std::vector<std::string> getInMemoryLogs() const {
     std::shared_ptr<InMemorySink> sink;
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
-      sink = state_.inMemorySink;
+      sink = activeStateLocked(std::this_thread::get_id()).inMemorySink;
     }
     return sink ? sink->getLogs() : std::vector<std::string>();
   }
 
   void setFilterLevels(std::initializer_list<LogLevel> levels) {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    state_.filterLevels = std::set<LogLevel>(levels.begin(), levels.end());
+    activeStateLocked(std::this_thread::get_id()).filterLevels = std::set<LogLevel>(levels.begin(), levels.end());
   }
 
   void clearFilterLevels() {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    state_.filterLevels.clear();
+    activeStateLocked(std::this_thread::get_id()).filterLevels.clear();
   }
 
+  // Create a temporary settings copy for the current thread. If this thread
+  // already has a temporary copy, use it as the starting point; otherwise,
+  // copy the global settings. Changes then affect only this temporary copy
+  // until popLogSetting() restores the previous settings.
   void pushLogSetting() {
     std::lock_guard<std::mutex> lock(stateMutex_);
-    settingStack_.push_back(state_);
+    const std::thread::id       threadId = std::this_thread::get_id();
+    std::vector<LoggerState>   &stack    = scopedStateStacks_[threadId];
+    stack.push_back(stack.empty() ? globalState_ : stack.back());
   }
 
   void popLogSetting() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
-    if (settingStack_.empty())
-      return;
-    state_ = settingStack_.back();
-    settingStack_.pop_back();
+    popLogSettingForThread(std::this_thread::get_id());
   }
 
   ScopedSettings scopedSettings();
@@ -682,6 +686,8 @@ public:
   }
 
 private:
+  friend class ScopedSettings;
+
   static std::size_t levelIndex(LogLevel level) {
     return static_cast<std::size_t>(level);
   }
@@ -715,6 +721,29 @@ private:
     return stream.str();
   }
 
+  // The caller must hold stateMutex_. Setters and logging use the current
+  // thread's top override when present, otherwise they use the global state.
+  LoggerState &activeStateLocked(const std::thread::id &threadId) {
+    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = scopedStateStacks_.find(threadId);
+    return stack == scopedStateStacks_.end() || stack->second.empty() ? globalState_ : stack->second.back();
+  }
+
+  const LoggerState &activeStateLocked(const std::thread::id &threadId) const {
+    std::map<std::thread::id, std::vector<LoggerState>>::const_iterator stack = scopedStateStacks_.find(threadId);
+    return stack == scopedStateStacks_.end() || stack->second.empty() ? globalState_ : stack->second.back();
+  }
+
+  void popLogSettingForThread(const std::thread::id &threadId) {
+    std::lock_guard<std::mutex>                                   lock(stateMutex_);
+    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = scopedStateStacks_.find(threadId);
+    if (stack == scopedStateStacks_.end() || stack->second.empty())
+      return;
+
+    stack->second.pop_back();
+    if (stack->second.empty())
+      scopedStateStacks_.erase(stack);
+  }
+
   void logString(LogLevel level, const std::string &message, const std::string &function,
                  const std::string &className) {
     std::vector<std::shared_ptr<LogSink>> sinks;
@@ -722,15 +751,16 @@ private:
 
     {
       std::lock_guard<std::mutex> lock(stateMutex_);
-      if (level > state_.logLevel)
+      const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
+      if (level > state.logLevel)
         return;
-      if (!state_.filterLevels.empty() && state_.filterLevels.count(level) == 0)
+      if (!state.filterLevels.empty() && state.filterLevels.count(level) == 0)
         return;
 
       const std::size_t index = levelIndex(level);
-      if (index < state_.colors.size())
-        color = state_.colors[index];
-      sinks = state_.sinks;
+      if (index < state.colors.size())
+        color = state.colors[index];
+      sinks = state.sinks;
     }
 
     const LogEntry entry = {level, formatLog(level, message, function, className), color};
@@ -741,24 +771,28 @@ private:
       (*sink)->write(entry);
   }
 
-  mutable std::mutex       stateMutex_;
-  std::recursive_mutex     outputMutex_;
-  LoggerState              state_;
-  std::vector<LoggerState> settingStack_;
+  mutable std::mutex   stateMutex_;
+  std::recursive_mutex outputMutex_;
+  LoggerState          globalState_;
+
+  // Each thread owns an independent nested override stack. The map is stored
+  // on the logger so a moved ScopedSettings guard can still remove the stack
+  // created by its original thread.
+  std::map<std::thread::id, std::vector<LoggerState>> scopedStateStacks_;
 };
 
 class ScopedSettings {
 public:
-  explicit ScopedSettings(Logger &logger) : logger_(&logger) {
+  explicit ScopedSettings(Logger &logger) : logger_(&logger), ownerThread_(std::this_thread::get_id()) {
     logger_->pushLogSetting();
   }
 
   ~ScopedSettings() {
     if (logger_)
-      logger_->popLogSetting();
+      logger_->popLogSettingForThread(ownerThread_);
   }
 
-  ScopedSettings(ScopedSettings &&other) : logger_(other.logger_) {
+  ScopedSettings(ScopedSettings &&other) : logger_(other.logger_), ownerThread_(other.ownerThread_) {
     other.logger_ = nullptr;
   }
 
@@ -768,6 +802,9 @@ public:
 
 private:
   Logger *logger_;
+  // Remember the creating thread so destruction restores that same stack even
+  // if this movable guard is transferred before it is destroyed.
+  std::thread::id ownerThread_;
 };
 
 inline ScopedSettings Logger::scopedSettings() {

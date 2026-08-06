@@ -256,8 +256,61 @@ sink even when code exits early or throws an exception:
 ```
 
 `pushLogSetting()` and `popLogSetting()` remain available for compatibility.
-Settings affect the process-wide default logger, so overlapping settings scopes
-should be coordinated by the application.
+Their stacks, like `ScopedSettings`, are independent for each thread.
+When using them directly, call both methods on the same thread and balance every
+push with one pop. Prefer `ScopedSettings`, which does this automatically.
+
+The configuration rules are:
+
+- Outside a settings scope, setters update the global logger configuration.
+- Inside a settings scope, setters update only the calling thread's temporary
+  configuration.
+- A thread entering its first scope copies the current global configuration.
+- A nested scope copies that thread's current temporary configuration.
+- Leaving a scope restores the previous configuration for that thread only.
+- A global change made by another thread is visible after the local scope ends,
+  but it does not replace the local scope's existing snapshot.
+
+Internally, the logger calls `std::this_thread::get_id()` to identify the
+calling thread. That thread ID is used as the key for selecting its temporary
+settings stack. In simplified form, the lookup works like this:
+
+```cpp
+LoggerState &activeStateForCurrentThread() {
+  const std::thread::id threadId = std::this_thread::get_id();
+  const auto stack = scopedStateStacks_.find(threadId);
+
+  if (stack == scopedStateStacks_.end() || stack->second.empty())
+    return globalState_;
+
+  return stack->second.back();
+}
+```
+
+The thread ID provides separation between threads; it does not provide
+synchronization. A mutex protects the shared map while stacks are read, added,
+updated, or removed.
+
+Consequently, temporary settings can safely overlap:
+
+```cpp
+#include <thread>
+
+std::thread restrictiveWorker([] {
+  ScopedSettings temporary = LOGGER.scopedSettings();
+  LOGGER.setLogLevel(LogLevel::ERROR);
+  LOGGER_LOG(LogLevel::INFO, "Hidden only in this thread");
+});
+
+std::thread verboseWorker([] {
+  ScopedSettings temporary = LOGGER.scopedSettings();
+  LOGGER.setLogLevel(LogLevel::DEBUG);
+  LOGGER_LOG(LogLevel::DEBUG, "Visible in this thread");
+});
+
+restrictiveWorker.join();
+verboseWorker.join();
+```
 
 ## Custom sinks
 
@@ -320,10 +373,12 @@ code should use `LogLevel` and `LOGGER_LOG`, with
 
 ## Thread safety
 
-Configuration is copied under a state mutex, then released before output I/O.
-Output dispatch is serialized to keep complete entries ordered across sinks.
-File and memory sinks also protect their own state. Memory logs are returned by
-value as safe snapshots.
+The global configuration and all per-thread temporary-setting stacks are
+protected by a state mutex. Logging copies the active thread's configuration
+while holding that mutex, then releases it before output I/O. Output dispatch is
+serialized to keep complete entries ordered across sinks. File and memory sinks
+also protect their own state. Memory logs are returned by value as safe
+snapshots.
 
 ## License
 

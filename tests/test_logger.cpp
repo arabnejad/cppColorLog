@@ -1,5 +1,6 @@
 #include "cppColorLogger/logger.h"
 
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -8,6 +9,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 int multiTranslationUnitA();
@@ -369,6 +371,141 @@ TEST(LoggerDesignTest, NestedSettingsRestoreInOrder) {
   ASSERT_EQ(logs.size(), 2U);
   EXPECT_NE(logs[0].find("Visible inner"), std::string::npos);
   EXPECT_NE(logs[1].find("Visible restored"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, OverlappingScopedSettingsAreIsolatedByThread) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+  logger.setLogLevel(LogLevel::INFO);
+
+  std::atomic<int> readyThreads(0);
+
+  std::thread restrictiveThread([&logger, &readyThreads]() {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.setLogLevel(LogLevel::ERROR);
+    ++readyThreads;
+    while (readyThreads.load() != 2)
+      std::this_thread::yield();
+
+    logger.log(LogLevel::INFO, "Restrictive thread hidden", "restrictiveThread");
+    logger.log(LogLevel::ERROR, "Restrictive thread visible", "restrictiveThread");
+  });
+
+  std::thread verboseThread([&logger, &readyThreads]() {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.setLogLevel(LogLevel::DEBUG);
+    ++readyThreads;
+    while (readyThreads.load() != 2)
+      std::this_thread::yield();
+
+    logger.log(LogLevel::DEBUG, "Verbose thread visible", "verboseThread");
+  });
+
+  restrictiveThread.join();
+  verboseThread.join();
+  logger.log(LogLevel::INFO, "Global settings preserved", "mainThread");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 3U);
+
+  std::string combinedLogs;
+  for (std::vector<std::string>::const_iterator log = logs.begin(); log != logs.end(); ++log)
+    combinedLogs += *log + '\n';
+
+  EXPECT_EQ(combinedLogs.find("Restrictive thread hidden"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Restrictive thread visible"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Verbose thread visible"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Global settings preserved"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, NestedScopedSettingsRemainLocalToTheirThread) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+  logger.setLogLevel(LogLevel::INFO);
+
+  std::thread worker([&logger]() {
+    ScopedSettings outer = logger.scopedSettings();
+    logger.setLogLevel(LogLevel::ERROR);
+    logger.log(LogLevel::INFO, "Outer hidden before nested scope", "worker");
+
+    {
+      ScopedSettings inner = logger.scopedSettings();
+      logger.setLogLevel(LogLevel::DEBUG);
+      logger.log(LogLevel::DEBUG, "Inner visible", "worker");
+    }
+
+    logger.log(LogLevel::INFO, "Outer hidden after nested scope", "worker");
+  });
+
+  worker.join();
+  logger.log(LogLevel::INFO, "Global visible after worker scope", "mainThread");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 2U);
+  EXPECT_NE(logs[0].find("Inner visible"), std::string::npos);
+  EXPECT_NE(logs[1].find("Global visible after worker scope"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, GlobalChangesSurviveWhileAnotherThreadHasScopedSettings) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+  logger.setLogLevel(LogLevel::INFO);
+
+  std::atomic<bool> workerScopeReady(false);
+  std::atomic<bool> globalStateChanged(false);
+
+  std::thread worker([&logger, &workerScopeReady, &globalStateChanged]() {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.setLogLevel(LogLevel::ERROR);
+    workerScopeReady.store(true);
+    while (!globalStateChanged.load())
+      std::this_thread::yield();
+
+    logger.log(LogLevel::INFO, "Worker local setting preserved", "worker");
+    logger.log(LogLevel::ERROR, "Worker error visible", "worker");
+  });
+
+  while (!workerScopeReady.load())
+    std::this_thread::yield();
+  logger.setLogLevel(LogLevel::DEBUG);
+  logger.log(LogLevel::DEBUG, "Global change visible", "mainThread");
+  globalStateChanged.store(true);
+
+  worker.join();
+  logger.log(LogLevel::DEBUG, "Global change survived", "mainThread");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 3U);
+
+  std::string combinedLogs;
+  for (std::vector<std::string>::const_iterator log = logs.begin(); log != logs.end(); ++log)
+    combinedLogs += *log + '\n';
+
+  EXPECT_EQ(combinedLogs.find("Worker local setting preserved"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Worker error visible"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Global change visible"), std::string::npos);
+  EXPECT_NE(combinedLogs.find("Global change survived"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, MovedScopedSettingsRestoresItsCreatingThread) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+  logger.setLogLevel(LogLevel::INFO);
+
+  ScopedSettings settings = logger.scopedSettings();
+  logger.setLogLevel(LogLevel::ERROR);
+  logger.log(LogLevel::INFO, "Hidden by temporary setting", "mainThread");
+
+  // ScopedSettings is movable. Even when its destructor runs elsewhere, it
+  // must remove the override from the thread that created the scope.
+  std::thread cleanupThread([](ScopedSettings) {}, std::move(settings));
+  cleanupThread.join();
+
+  logger.log(LogLevel::INFO, "Creating thread restored", "mainThread");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 1U);
+  EXPECT_NE(logs[0].find("Creating thread restored"), std::string::npos);
 }
 
 TEST(LoggerDesignTest, EmptySettingsPopIsHarmless) {
