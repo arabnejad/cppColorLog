@@ -17,7 +17,6 @@
 #include <string>
 #include <thread>
 #include <typeinfo>
-#include <utility>
 #include <vector>
 
 #if defined(__GNUG__)
@@ -678,11 +677,34 @@ public:
 
   ScopedSettings scopedSettings();
 
+  /**
+   * @brief Checks whether a log level is currently enabled.
+   *
+   * Uses the calling thread's active threshold and filter. This only checks the
+   * current settings; it does not create or write a message. The returned value
+   * is a snapshot and can become outdated if the settings change afterward.
+   *
+   * @param level The level that a future message would use.
+   * @return True when the level passes both the threshold and filter.
+   */
+  bool isEnabled(LogLevel level) const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    return acceptsLevel(activeStateLocked(std::this_thread::get_id()), level);
+  }
+
   template <typename T>
   void log(LogLevel level, const T &message, const std::string &function = "", const std::string &className = "") {
+    // Avoid converting a rejected value to text. Expressions passed as
+    // `message` have already been evaluated by the caller; use isEnabled()
+    // before the call when creating the value itself is expensive.
+    std::vector<std::shared_ptr<LogSink>> sinks;
+    std::string                           color;
+    if (!captureOutputSettings(level, sinks, color))
+      return;
+
     std::ostringstream stream;
     stream << message;
-    logString(level, stream.str(), function, className);
+    writeToSinks(level, stream.str(), function, className, color, sinks);
   }
 
 private:
@@ -733,6 +755,11 @@ private:
     return stack == scopedStateStacks_.end() || stack->second.empty() ? globalState_ : stack->second.back();
   }
 
+  // Keep the threshold and filter rule in one place for isEnabled() and log().
+  static bool acceptsLevel(const LoggerState &state, LogLevel level) {
+    return level <= state.logLevel && (state.filterLevels.empty() || state.filterLevels.count(level) != 0);
+  }
+
   void popLogSettingForThread(const std::thread::id &threadId) {
     std::lock_guard<std::mutex>                                   lock(stateMutex_);
     std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = scopedStateStacks_.find(threadId);
@@ -744,25 +771,23 @@ private:
       scopedStateStacks_.erase(stack);
   }
 
-  void logString(LogLevel level, const std::string &message, const std::string &function,
-                 const std::string &className) {
-    std::vector<std::shared_ptr<LogSink>> sinks;
-    std::string                           color = Color::WHITE;
+  // Check the level and copy the selected color and sinks while holding the
+  // state lock. Message formatting and output happen after releasing the lock.
+  bool captureOutputSettings(LogLevel level, std::vector<std::shared_ptr<LogSink>> &sinks, std::string &color) const {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
+    if (!acceptsLevel(state, level))
+      return false;
 
-    {
-      std::lock_guard<std::mutex> lock(stateMutex_);
-      const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
-      if (level > state.logLevel)
-        return;
-      if (!state.filterLevels.empty() && state.filterLevels.count(level) == 0)
-        return;
+    const std::size_t index = levelIndex(level);
+    color                   = index < state.colors.size() ? state.colors[index] : Color::WHITE;
+    sinks                   = state.sinks;
+    return true;
+  }
 
-      const std::size_t index = levelIndex(level);
-      if (index < state.colors.size())
-        color = state.colors[index];
-      sinks = state.sinks;
-    }
-
+  void writeToSinks(LogLevel level, const std::string &message, const std::string &function,
+                    const std::string &className, const std::string &color,
+                    const std::vector<std::shared_ptr<LogSink>> &sinks) {
     const LogEntry entry = {level, formatLog(level, message, function, className), color};
 
     // Keep complete entries ordered without holding the configuration lock during I/O.
@@ -861,6 +886,7 @@ inline std::string demangle(const char *name) {
  * Example: LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "worker", "Task started");
  */
 #define LOGGER_LOG_WITH_CONTEXT(level, context, message) ::cppcolorlog::defaultLogger().log(level, message, context)
+
 #define LOGGER_C(level, message)                                                                                       \
   ::cppcolorlog::defaultLogger().log(level, message, __func__, ::cppcolorlog::demangle(typeid(*this).name()))
 #define LOGGER_F(level, message) ::cppcolorlog::defaultLogger().log(level, message, __func__)

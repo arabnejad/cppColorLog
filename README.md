@@ -13,6 +13,7 @@ multiple sinks, temporary settings, and thread-safe configuration and output.
 - Customizable console colors
 - Console, file, in-memory, and user-defined sinks
 - Threshold and whitelist filtering
+- Fast enabled-level checks for guarding expensive messages
 - Exception-safe scoped settings, plus compatible push/pop methods
 - Unified automatic function and class context on GCC, Clang, and MSVC
 - Portable time formatting and guarded GNU demangling
@@ -78,6 +79,34 @@ accepts `WARN`, `INFO`, and `DEBUG`.
 
 `ALWAYS` always passes the verbosity threshold. Like every other level, it can
 still be excluded by an active whitelist filter.
+
+## Avoiding expensive rejected messages
+
+For ordinary strings and inexpensive values, log normally:
+
+```cpp
+LOGGER_LOG(LogLevel::INFO, "Application started");
+```
+
+The logger checks the threshold and filter before converting the value with
+`std::ostringstream`. However, C++ creates function arguments before calling
+the logger, so this expensive message is still built when `DEBUG` is disabled:
+
+```cpp
+LOGGER_LOG(LogLevel::DEBUG, buildExpensiveDebugMessage());
+```
+
+Check the level before doing expensive work:
+
+```cpp
+if (LOGGER.isEnabled(LogLevel::DEBUG)) {
+  LOGGER_LOG(LogLevel::DEBUG, buildExpensiveDebugMessage());
+}
+```
+
+`isEnabled()` works in C++11 and newer. It returns a snapshot of the calling
+thread's settings. If those settings change after the check, `LOGGER_LOG`
+checks them again before formatting and writing the message.
 
 ## Automatic source context
 

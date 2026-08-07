@@ -101,6 +101,22 @@ private:
   Logger &logger_;
 };
 
+struct StreamCountingMessage {
+  explicit StreamCountingMessage(int &count) : streamCount(count) {}
+
+  int &streamCount;
+};
+
+std::ostream &operator<<(std::ostream &stream, const StreamCountingMessage &message) {
+  ++message.streamCount;
+  return stream << "counted message";
+}
+
+std::string buildCountedMessage(int &buildCount) {
+  ++buildCount;
+  return "expensive debug message";
+}
+
 class ContextExample {
 public:
   void emit() {
@@ -532,6 +548,61 @@ TEST(LoggerDesignTest, AlwaysAndVerboseThresholdSemanticsArePreserved) {
   logger.setFilterLevels({LogLevel::ERROR});
   logger.log(LogLevel::ALWAYS, "Always filtered by whitelist", "levelTest");
   EXPECT_EQ(sink->getLogs().size(), 2U);
+}
+
+TEST(LoggerDesignTest, IsEnabledUsesThresholdAndFilter) {
+  Logger logger(false);
+  logger.setLogLevel(LogLevel::INFO);
+
+  EXPECT_TRUE(logger.isEnabled(LogLevel::ERROR));
+  EXPECT_TRUE(logger.isEnabled(LogLevel::INFO));
+  EXPECT_FALSE(logger.isEnabled(LogLevel::DEBUG));
+
+  logger.setFilterLevels({LogLevel::ERROR});
+  EXPECT_TRUE(logger.isEnabled(LogLevel::ERROR));
+  EXPECT_FALSE(logger.isEnabled(LogLevel::INFO));
+
+  {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.clearFilterLevels();
+    logger.setLogLevel(LogLevel::DEBUG);
+    EXPECT_TRUE(logger.isEnabled(LogLevel::DEBUG));
+  }
+
+  EXPECT_FALSE(logger.isEnabled(LogLevel::DEBUG));
+}
+
+TEST(LoggerDesignTest, RejectedEagerMessageIsNotConvertedToText) {
+  Logger logger(false);
+  logger.setLogLevel(LogLevel::INFO);
+  int streamCount = 0;
+
+  logger.log(LogLevel::DEBUG, StreamCountingMessage(streamCount), "eagerTest");
+
+  EXPECT_EQ(streamCount, 0);
+}
+
+TEST(LoggerDesignTest, IsEnabledAvoidsConstructingRejectedMessage) {
+  Logger logger(false);
+  logger.setLogLevel(LogLevel::INFO);
+  int buildCount = 0;
+
+  if (logger.isEnabled(LogLevel::DEBUG))
+    logger.log(LogLevel::DEBUG, buildCountedMessage(buildCount), "guardedTest");
+
+  EXPECT_EQ(buildCount, 0);
+}
+
+TEST(LoggerDesignTest, IsEnabledAvoidsConstructingFilteredMessage) {
+  Logger logger(false);
+  logger.setLogLevel(LogLevel::DEBUG);
+  logger.setFilterLevels({LogLevel::ERROR});
+  int buildCount = 0;
+
+  if (logger.isEnabled(LogLevel::DEBUG))
+    logger.log(LogLevel::DEBUG, buildCountedMessage(buildCount), "guardedFilterTest");
+
+  EXPECT_EQ(buildCount, 0);
 }
 
 TEST(LoggerDesignTest, ReentrantCustomSinkDoesNotDeadlock) {
