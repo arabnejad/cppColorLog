@@ -75,13 +75,15 @@ public:
   }
 
   void write(const LogEntry &entry) override {
-    level = entry.level;
-    color = entry.color;
-    text  = entry.text;
+    level     = entry.level;
+    color     = entry.color;
+    colorMode = entry.colorMode;
+    text      = entry.text;
   }
 
   LogLevel    level = LogLevel::ALWAYS;
   std::string color;
+  ColorMode   colorMode = ColorMode::AUTOMATIC;
   std::string text;
 };
 
@@ -169,6 +171,7 @@ public:
 TEST_F(LoggerTest, LogsToFileWithoutColor) {
   const std::shared_ptr<FileSink> sink = LOGGER.addFileSink(logFile);
   ASSERT_TRUE(sink->isOpen());
+  LOGGER.setColorEnabled(true);
 
   LOGGER_F(LogLevel::INFO, "File log test");
 
@@ -234,11 +237,13 @@ TEST_F(LoggerTest, ScopedSettingsRestoresConfiguration) {
 
 TEST_F(LoggerTest, InMemorySinkCapturesLog) {
   LOGGER.enableInMemorySink();
+  LOGGER.setColorEnabled(true);
   LOGGER_F(LogLevel::INFO, "Memory captured log");
 
   const std::vector<std::string> logs = LOGGER.getInMemoryLogs();
   ASSERT_FALSE(logs.empty());
   EXPECT_NE(logs.back().find("Memory captured log"), std::string::npos);
+  EXPECT_EQ(logs.back().find("\033["), std::string::npos);
 }
 
 TEST_F(LoggerTest, InMemorySinkCanBeEnabledAgainAfterSettingsPop) {
@@ -256,6 +261,7 @@ TEST_F(LoggerTest, InMemorySinkCanBeEnabledAgainAfterSettingsPop) {
 TEST_F(LoggerTest, ConsoleUsesConfiguredColor) {
   std::string customColor = Color::CYAN;
   LOGGER.setLevelColor(LogLevel::INFO, customColor);
+  LOGGER.setColorEnabled(true);
   customColor.clear();
   LOGGER_F(LogLevel::INFO, "Custom color");
 
@@ -264,6 +270,44 @@ TEST_F(LoggerTest, ConsoleUsesConfiguredColor) {
   EXPECT_NE(output.find(Color::RESET), std::string::npos);
   EXPECT_NE(output.find("Custom color"), std::string::npos);
 }
+
+TEST_F(LoggerTest, ConsoleOmitsColorWhenExplicitlyDisabled) {
+  LOGGER.setColorEnabled(false);
+  LOGGER_F(LogLevel::INFO, "Plain console message");
+
+  const std::string output = capturedCout.str();
+  EXPECT_NE(output.find("Plain console message"), std::string::npos);
+  EXPECT_EQ(output.find("\033["), std::string::npos);
+}
+
+TEST(ConsoleColorPolicyTest, AutomaticColorRequiresSupportedTerminal) {
+  using cppcolorlog::detail::resolveColorEnabled;
+
+  EXPECT_TRUE(resolveColorEnabled(ColorMode::AUTOMATIC, true, false));
+  EXPECT_FALSE(resolveColorEnabled(ColorMode::AUTOMATIC, false, false));
+  EXPECT_FALSE(resolveColorEnabled(ColorMode::AUTOMATIC, true, true));
+}
+
+TEST(ConsoleColorPolicyTest, ExplicitSettingOverridesAutomaticPolicy) {
+  using cppcolorlog::detail::resolveColorEnabled;
+
+  EXPECT_TRUE(resolveColorEnabled(ColorMode::ENABLED, false, true));
+  EXPECT_FALSE(resolveColorEnabled(ColorMode::DISABLED, true, false));
+}
+
+TEST(ConsoleColorPolicyTest, NoColorRequiresANonEmptyValue) {
+  using cppcolorlog::detail::hasNoColorValue;
+
+  EXPECT_FALSE(hasNoColorValue(nullptr));
+  EXPECT_FALSE(hasNoColorValue(""));
+  EXPECT_TRUE(hasNoColorValue("1"));
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+TEST(ConsoleColorPolicyTest, PosixTerminalDetectionUsesIsatty) {
+  EXPECT_EQ(cppcolorlog::detail::consoleSupportsColor(), ::isatty(STDOUT_FILENO) != 0);
+}
+#endif
 
 TEST_F(LoggerTest, OutputContainsTimestampAndClassContext) {
   ContextExample example;
@@ -364,6 +408,27 @@ TEST(LoggerDesignTest, StructuredSinkReceivesLevelAndColor) {
   EXPECT_EQ(sink->level, LogLevel::WARN);
   EXPECT_EQ(sink->color, Color::BLUE);
   EXPECT_NE(sink->text.find("Structured message"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, ScopedSettingsRestoreColorMode) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+  logger.setColorEnabled(false);
+
+  {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.setColorEnabled(true);
+    logger.log(LogLevel::INFO, "Colored in scope", "colorTest");
+    EXPECT_EQ(sink->colorMode, ColorMode::ENABLED);
+  }
+
+  logger.log(LogLevel::INFO, "Disabled mode restored", "colorTest");
+  EXPECT_EQ(sink->colorMode, ColorMode::DISABLED);
+
+  logger.useAutomaticColor();
+  logger.log(LogLevel::INFO, "Automatic mode restored", "colorTest");
+  EXPECT_EQ(sink->colorMode, ColorMode::AUTOMATIC);
 }
 
 TEST(LoggerDesignTest, NestedSettingsRestoreInOrder) {

@@ -10,7 +10,7 @@ multiple sinks, temporary settings, and thread-safe configuration and output.
 - One header and a CMake interface target
 - C++11 and newer
 - Thread-safe settings, output dispatch, file output, and memory snapshots
-- Customizable console colors
+- Terminal-aware and customizable console colors
 - Console, file, in-memory, and user-defined sinks
 - Threshold and whitelist filtering
 - Fast enabled-level checks for guarding expensive messages
@@ -269,6 +269,60 @@ LOGGER_LOG(LogLevel::INFO, "Cyan console message");
 
 Colors are owned as strings by the logger. File and memory sinks receive plain
 text without ANSI escape sequences.
+
+By default, `ConsoleSink` adds ANSI colors only when standard output is an
+interactive terminal. Redirected output, such as a file or pipe, stays plain.
+On Windows, the logger enables virtual-terminal processing when the console
+supports it.
+
+A non-empty `NO_COLOR` environment variable disables colors in automatic mode:
+
+```bash
+NO_COLOR=1 ./your_application
+```
+
+Applications can override automatic detection:
+
+```cpp
+LOGGER.setColorEnabled(false); // Always use plain console output
+LOGGER.setColorEnabled(true);  // Always include ANSI colors
+LOGGER.useAutomaticColor();    // Detect the terminal and respect NO_COLOR
+```
+
+The logger stores this choice as a `ColorMode`:
+
+| Mode | How to select it | Behaviour |
+| --- | --- | --- |
+| `ColorMode::AUTOMATIC` | Default, or call `useAutomaticColor()` | Uses color for a supported interactive terminal. Uses plain text for redirected output or when `NO_COLOR` is set. |
+| `ColorMode::ENABLED` | Call `setColorEnabled(true)` | Always adds ANSI color codes, even when output is redirected or `NO_COLOR` is set. |
+| `ColorMode::DISABLED` | Call `setColorEnabled(false)` | Never adds ANSI color codes. |
+
+Most applications should keep the default `AUTOMATIC` mode. Use `ENABLED` only
+when the destination is known to understand ANSI codes. Otherwise, redirected
+logs may contain visible escape characters. Use `DISABLED` when plain output is
+always required.
+
+### How automatic terminal detection works
+
+In `AUTOMATIC` mode, the logger checks standard output (`stdout`) before adding
+ANSI color codes:
+
+- On Linux and macOS, it calls `isatty(STDOUT_FILENO)`. A true result means
+  stdout is connected to an interactive terminal, which the logger assumes can
+  display ANSI colors. Redirection to a file or pipe normally returns false.
+- On Windows, it calls `GetStdHandle(STD_OUTPUT_HANDLE)` and `GetConsoleMode()`
+  to verify that stdout is a console. It then uses `SetConsoleMode()` to enable
+  virtual-terminal processing. Automatic color is used only when these checks
+  succeed.
+- On other platforms, automatic color is disabled because terminal support
+  cannot be confirmed.
+
+After detecting the terminal, the logger checks `NO_COLOR`. A non-empty value
+turns color off in `AUTOMATIC` mode even when stdout is an interactive terminal.
+
+Explicit `ENABLED` or `DISABLED` settings take priority over `NO_COLOR` and
+terminal detection. These settings also work with `ScopedSettings`, so temporary
+changes are restored automatically.
 
 ## Temporary settings
 

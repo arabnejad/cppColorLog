@@ -23,6 +23,15 @@
 #include <cxxabi.h>
 #endif
 
+#if defined(_WIN32)
+#include <windows.h>
+#ifdef ERROR
+#undef ERROR
+#endif
+#elif defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
+
 // Internal linkage keeps these header definitions safe across translation units.
 namespace Color {
 static const char RESET[]   = "\033[0m";
@@ -38,6 +47,11 @@ static const char WHITE[]   = "\033[37m";
 namespace cppcolorlog {
 
 enum class LogLevel { ALWAYS, FATAL, ERROR, WARN, INFO, DEBUG, VERBOSE };
+
+// AUTOMATIC is the safe default: use color for a supported interactive terminal,
+// but not for redirected output or when NO_COLOR is set. ENABLED always emits
+// ANSI colors, and DISABLED always emits plain text.
+enum class ColorMode { AUTOMATIC, ENABLED, DISABLED };
 
 inline const char *toString(LogLevel level) {
   switch (level) {
@@ -483,12 +497,100 @@ inline std::string normalizeFunctionSignature(const std::string &rawSignature,
 
 } // namespace detail
 
+namespace detail {
+
+/**
+ * @brief Checks whether a NO_COLOR environment value requests plain output.
+ *
+ * The NO_COLOR convention disables automatic color when the variable exists
+ * and contains at least one character. An unset or empty value does not disable
+ * color.
+ */
+inline bool hasNoColorValue(const char *value) {
+  return value != nullptr && value[0] != '\0';
+}
+
+/**
+ * @brief Applies the color-mode priority without accessing the operating system.
+ *
+ * Explicit enable or disable settings have highest priority. AUTOMATIC uses
+ * color only when the output supports it and NO_COLOR is not requested.
+ */
+inline bool resolveColorEnabled(ColorMode mode, bool terminalSupportsColor, bool noColorRequested) {
+  if (mode == ColorMode::ENABLED)
+    return true;
+  if (mode == ColorMode::DISABLED)
+    return false;
+  return terminalSupportsColor && !noColorRequested;
+}
+
+/**
+ * @brief Detects whether standard output can display ANSI colors.
+ *
+ * On Linux and macOS, isatty(STDOUT_FILENO) checks whether stdout is connected
+ * to a terminal instead of a file or pipe. An interactive terminal is assumed
+ * to support ANSI colors.
+ *
+ * On Windows, GetStdHandle() finds stdout and GetConsoleMode() verifies that it
+ * is a console. If needed, SetConsoleMode() attempts to enable virtual-terminal
+ * processing, which allows the console to understand ANSI color codes.
+ *
+ * Other platforms return false because color support cannot be confirmed. The
+ * NO_COLOR environment variable is handled separately by
+ * shouldUseConsoleColor().
+ */
+inline bool consoleSupportsColor() {
+#if defined(_WIN32)
+  const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+  if (output == INVALID_HANDLE_VALUE || output == nullptr)
+    return false;
+
+  DWORD mode = 0;
+  if (GetConsoleMode(output, &mode) == 0)
+    return false;
+
+  const DWORD virtualTerminalProcessing = 0x0004;
+  if ((mode & virtualTerminalProcessing) != 0)
+    return true;
+  return SetConsoleMode(output, mode | virtualTerminalProcessing) != 0;
+#elif defined(__unix__) || defined(__APPLE__)
+  return ::isatty(STDOUT_FILENO) != 0;
+#else
+  return false;
+#endif
+}
+
+/**
+ * @brief Resolves the color mode against the current terminal and environment.
+ *
+ * Explicit enabling forces ANSI output. On Windows it also attempts to enable
+ * virtual-terminal processing. Automatic mode respects both terminal support
+ * and the NO_COLOR environment variable.
+ */
+inline bool shouldUseConsoleColor(ColorMode mode) {
+  if (mode == ColorMode::ENABLED) {
+#if defined(_WIN32)
+    (void)consoleSupportsColor();
+#endif
+    return true;
+  }
+  if (mode == ColorMode::DISABLED)
+    return false;
+
+  const bool noColorRequested      = hasNoColorValue(std::getenv("NO_COLOR"));
+  const bool terminalSupportsColor = noColorRequested ? false : consoleSupportsColor();
+  return resolveColorEnabled(mode, terminalSupportsColor, noColorRequested);
+}
+
+} // namespace detail
+
 // Sinks receive the rendered text and the metadata needed for output-specific
 // decisions. They never need to parse the formatted message.
 struct LogEntry {
   LogLevel    level;
   std::string text;
   std::string color;
+  ColorMode   colorMode;
 };
 
 class LogSink {
@@ -515,13 +617,16 @@ public:
   }
 
   void write(const std::string &message) override {
-    const LogEntry entry = {LogLevel::ALWAYS, message, Color::WHITE};
+    const LogEntry entry = {LogLevel::ALWAYS, message, Color::WHITE, ColorMode::AUTOMATIC};
     write(entry);
   }
 
   void write(const LogEntry &entry) override {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::cout << entry.color << entry.text << Color::RESET << std::endl;
+    if (detail::shouldUseConsoleColor(entry.colorMode) && !entry.color.empty())
+      std::cout << entry.color << entry.text << Color::RESET << std::endl;
+    else
+      std::cout << entry.text << std::endl;
   }
 
 private:
@@ -573,11 +678,13 @@ private:
 struct LoggerState {
   LoggerState()
       : logLevel(LogLevel::INFO),
-        colors{{Color::WHITE, Color::MAGENTA, Color::RED, Color::YELLOW, Color::GREEN, Color::CYAN, Color::BLUE}} {}
+        colors{{Color::WHITE, Color::MAGENTA, Color::RED, Color::YELLOW, Color::GREEN, Color::CYAN, Color::BLUE}},
+        colorMode(ColorMode::AUTOMATIC) {}
 
   LogLevel                              logLevel;
   std::set<LogLevel>                    filterLevels;
   std::array<std::string, 7>            colors;
+  ColorMode                             colorMode;
   std::vector<std::shared_ptr<LogSink>> sinks;
   std::shared_ptr<InMemorySink>         inMemorySink;
 };
@@ -585,6 +692,14 @@ struct LoggerState {
 class ScopedSettings;
 
 class Logger {
+  struct OutputSettings {
+    OutputSettings() : color(Color::WHITE), colorMode(ColorMode::AUTOMATIC) {}
+
+    std::string                           color;
+    ColorMode                             colorMode;
+    std::vector<std::shared_ptr<LogSink>> sinks;
+  };
+
 public:
   // Public construction enables isolated logger instances in tests and tools.
   explicit Logger(bool addConsoleSink = true) {
@@ -611,6 +726,19 @@ public:
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
     if (index < state.colors.size())
       state.colors[index] = color;
+  }
+
+  // Explicitly enable or disable ANSI color for the calling thread's active
+  // settings. This choice overrides terminal detection and NO_COLOR.
+  void setColorEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    activeStateLocked(std::this_thread::get_id()).colorMode = enabled ? ColorMode::ENABLED : ColorMode::DISABLED;
+  }
+
+  // Return to automatic terminal detection and NO_COLOR handling.
+  void useAutomaticColor() {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    activeStateLocked(std::this_thread::get_id()).colorMode = ColorMode::AUTOMATIC;
   }
 
   void addSink(const std::shared_ptr<LogSink> &sink) {
@@ -697,14 +825,13 @@ public:
     // Avoid converting a rejected value to text. Expressions passed as
     // `message` have already been evaluated by the caller; use isEnabled()
     // before the call when creating the value itself is expensive.
-    std::vector<std::shared_ptr<LogSink>> sinks;
-    std::string                           color;
-    if (!captureOutputSettings(level, sinks, color))
+    OutputSettings output;
+    if (!captureOutputSettings(level, output))
       return;
 
     std::ostringstream stream;
     stream << message;
-    writeToSinks(level, stream.str(), function, className, color, sinks);
+    writeToSinks(level, stream.str(), function, className, output);
   }
 
 private:
@@ -773,26 +900,27 @@ private:
 
   // Check the level and copy the selected color and sinks while holding the
   // state lock. Message formatting and output happen after releasing the lock.
-  bool captureOutputSettings(LogLevel level, std::vector<std::shared_ptr<LogSink>> &sinks, std::string &color) const {
+  bool captureOutputSettings(LogLevel level, OutputSettings &output) const {
     std::lock_guard<std::mutex> lock(stateMutex_);
     const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
     if (!acceptsLevel(state, level))
       return false;
 
     const std::size_t index = levelIndex(level);
-    color                   = index < state.colors.size() ? state.colors[index] : Color::WHITE;
-    sinks                   = state.sinks;
+    output.color            = index < state.colors.size() ? state.colors[index] : Color::WHITE;
+    output.colorMode        = state.colorMode;
+    output.sinks            = state.sinks;
     return true;
   }
 
   void writeToSinks(LogLevel level, const std::string &message, const std::string &function,
-                    const std::string &className, const std::string &color,
-                    const std::vector<std::shared_ptr<LogSink>> &sinks) {
-    const LogEntry entry = {level, formatLog(level, message, function, className), color};
+                    const std::string &className, const OutputSettings &output) {
+    const LogEntry entry = {level, formatLog(level, message, function, className), output.color, output.colorMode};
 
     // Keep complete entries ordered without holding the configuration lock during I/O.
     std::lock_guard<std::recursive_mutex> outputLock(outputMutex_);
-    for (std::vector<std::shared_ptr<LogSink>>::const_iterator sink = sinks.begin(); sink != sinks.end(); ++sink)
+    for (std::vector<std::shared_ptr<LogSink>>::const_iterator sink = output.sinks.begin(); sink != output.sinks.end();
+         ++sink)
       (*sink)->write(entry);
   }
 
@@ -845,6 +973,7 @@ inline Logger &defaultLogger() {
 // Compatibility aliases preserve the original public API.
 using LogLevel       = cppcolorlog::LogLevel;
 using LOGLEVELL      = cppcolorlog::LogLevel;
+using ColorMode      = cppcolorlog::ColorMode;
 using LogEntry       = cppcolorlog::LogEntry;
 using LogSink        = cppcolorlog::LogSink;
 using ConsoleSink    = cppcolorlog::ConsoleSink;
