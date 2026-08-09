@@ -593,6 +593,34 @@ struct LogEntry {
   ColorMode   colorMode;
 };
 
+class Logger;
+
+/**
+ * @brief Identifies one sink registration in one Logger.
+ *
+ * Keep the handle returned by Logger::addSink() when the sink may need to be
+ * removed later. A handle belongs only to the Logger that created it. Copies of
+ * the handle identify the same registration.
+ */
+class SinkHandle {
+public:
+  SinkHandle() : logger_(nullptr), id_(0) {}
+
+  // True means the handle was created by a Logger. It does not guarantee that
+  // the sink is still registered, because it may already have been removed.
+  bool isValid() const {
+    return logger_ != nullptr;
+  }
+
+private:
+  friend class Logger;
+
+  SinkHandle(const Logger *logger, std::size_t id) : logger_(logger), id_(id) {}
+
+  const Logger *logger_;
+  std::size_t   id_;
+};
+
 class LogSink {
 public:
   virtual ~LogSink() {}
@@ -681,12 +709,12 @@ struct LoggerState {
         colors{{Color::WHITE, Color::MAGENTA, Color::RED, Color::YELLOW, Color::GREEN, Color::CYAN, Color::BLUE}},
         colorMode(ColorMode::AUTOMATIC) {}
 
-  LogLevel                              logLevel;
-  std::set<LogLevel>                    filterLevels;
-  std::array<std::string, 7>            colors;
-  ColorMode                             colorMode;
-  std::vector<std::shared_ptr<LogSink>> sinks;
-  std::shared_ptr<InMemorySink>         inMemorySink;
+  LogLevel                                        logLevel;
+  std::set<LogLevel>                              filterLevels;
+  std::array<std::string, 7>                      colors;
+  ColorMode                                       colorMode;
+  std::map<std::size_t, std::shared_ptr<LogSink>> sinks;
+  std::shared_ptr<InMemorySink>                   inMemorySink;
 };
 
 class ScopedSettings;
@@ -702,9 +730,9 @@ class Logger {
 
 public:
   // Public construction enables isolated logger instances in tests and tools.
-  explicit Logger(bool addConsoleSink = true) {
-    if (addConsoleSink)
-      globalState_.sinks.push_back(std::make_shared<ConsoleSink>());
+  explicit Logger(bool addDefaultConsoleSink = true) : nextSinkId_(1) {
+    if (addDefaultConsoleSink)
+      defaultConsoleSinkHandle_ = addSinkLocked(globalState_, std::make_shared<ConsoleSink>());
   }
 
   static Logger &getInstance() {
@@ -741,11 +769,69 @@ public:
     activeStateLocked(std::this_thread::get_id()).colorMode = ColorMode::AUTOMATIC;
   }
 
-  void addSink(const std::shared_ptr<LogSink> &sink) {
+  /**
+   * @brief Adds a sink and returns the handle needed to remove it later.
+   *
+   * A null sink is ignored and returns an invalid handle. Inside a settings
+   * scope, the sink is added only to that temporary settings copy.
+   */
+  SinkHandle addSink(const std::shared_ptr<LogSink> &sink) {
     if (!sink)
-      return;
+      return SinkHandle();
     std::lock_guard<std::mutex> lock(stateMutex_);
-    activeStateLocked(std::this_thread::get_id()).sinks.push_back(sink);
+    return addSinkLocked(activeStateLocked(std::this_thread::get_id()), sink);
+  }
+
+  /**
+   * @brief Adds a console sink and returns its removal handle.
+   *
+   * Use this to restore console logging after removing the default console sink
+   * or calling clearSinks().
+   */
+  SinkHandle addConsoleSink() {
+    return addSink(std::make_shared<ConsoleSink>());
+  }
+
+  /** Returns the handle created for this Logger's initial console sink. */
+  SinkHandle getDefaultConsoleSinkHandle() const {
+    return defaultConsoleSinkHandle_;
+  }
+
+  /**
+   * @brief Removes one sink from the calling thread's active settings.
+   *
+   * Returns false for an invalid, foreign, unknown, or already-removed handle.
+   * A write that already copied the sink may finish after this method returns;
+   * its shared ownership keeps that write safe.
+   */
+  bool removeSink(const SinkHandle &handle) {
+    if (handle.logger_ != this)
+      return false;
+
+    std::lock_guard<std::mutex>                               lock(stateMutex_);
+    LoggerState                                              &state = activeStateLocked(std::this_thread::get_id());
+    std::map<std::size_t, std::shared_ptr<LogSink>>::iterator sink  = state.sinks.find(handle.id_);
+    if (sink == state.sinks.end())
+      return false;
+
+    const bool removedMemorySink = state.inMemorySink && sink->second.get() == state.inMemorySink.get();
+    state.sinks.erase(sink);
+    if (removedMemorySink && !containsSinkLocked(state, state.inMemorySink))
+      state.inMemorySink.reset();
+    return true;
+  }
+
+  /**
+   * @brief Removes every sink from the calling thread's active settings.
+   *
+   * This includes the default console sink and the managed in-memory sink. Call
+   * addConsoleSink() or enableInMemorySink() to add either one again.
+   */
+  void clearSinks() {
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    state.sinks.clear();
+    state.inMemorySink.reset();
   }
 
   std::shared_ptr<FileSink> addFileSink(const std::string &filename) {
@@ -764,7 +850,7 @@ public:
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
     if (!state.inMemorySink) {
       state.inMemorySink = std::make_shared<InMemorySink>();
-      state.sinks.push_back(state.inMemorySink);
+      addSinkLocked(state, state.inMemorySink);
     }
     return state.inMemorySink;
   }
@@ -836,6 +922,21 @@ public:
 
 private:
   friend class ScopedSettings;
+
+  SinkHandle addSinkLocked(LoggerState &state, const std::shared_ptr<LogSink> &sink) {
+    const std::size_t id = nextSinkId_++;
+    state.sinks[id]      = sink;
+    return SinkHandle(this, id);
+  }
+
+  static bool containsSinkLocked(const LoggerState &state, const std::shared_ptr<LogSink> &wanted) {
+    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.sinks.begin();
+         sink != state.sinks.end(); ++sink) {
+      if (sink->second.get() == wanted.get())
+        return true;
+    }
+    return false;
+  }
 
   static std::size_t levelIndex(LogLevel level) {
     return static_cast<std::size_t>(level);
@@ -909,7 +1010,10 @@ private:
     const std::size_t index = levelIndex(level);
     output.color            = index < state.colors.size() ? state.colors[index] : Color::WHITE;
     output.colorMode        = state.colorMode;
-    output.sinks            = state.sinks;
+    output.sinks.reserve(state.sinks.size());
+    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.sinks.begin();
+         sink != state.sinks.end(); ++sink)
+      output.sinks.push_back(sink->second);
     return true;
   }
 
@@ -927,6 +1031,8 @@ private:
   mutable std::mutex   stateMutex_;
   std::recursive_mutex outputMutex_;
   LoggerState          globalState_;
+  std::size_t          nextSinkId_;
+  SinkHandle           defaultConsoleSinkHandle_;
 
   // Each thread owns an independent nested override stack. The map is stored
   // on the logger so a moved ScopedSettings guard can still remove the stack
@@ -975,6 +1081,7 @@ using LogLevel       = cppcolorlog::LogLevel;
 using LOGLEVELL      = cppcolorlog::LogLevel;
 using ColorMode      = cppcolorlog::ColorMode;
 using LogEntry       = cppcolorlog::LogEntry;
+using SinkHandle     = cppcolorlog::SinkHandle;
 using LogSink        = cppcolorlog::LogSink;
 using ConsoleSink    = cppcolorlog::ConsoleSink;
 using FileSink       = cppcolorlog::FileSink;

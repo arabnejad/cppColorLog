@@ -1,6 +1,7 @@
 #include "cppColorLogger/logger.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
@@ -66,6 +67,28 @@ public:
   }
 
   std::vector<std::string> messages;
+};
+
+struct BlockingSinkState {
+  std::mutex              mutex;
+  std::condition_variable changed;
+  bool                    writeStarted = false;
+  bool                    mayFinish    = false;
+};
+
+class BlockingSink : public LogSink {
+public:
+  explicit BlockingSink(const std::shared_ptr<BlockingSinkState> &state) : state_(state) {}
+
+  void write(const std::string &) override {
+    std::unique_lock<std::mutex> lock(state_->mutex);
+    state_->writeStarted = true;
+    state_->changed.notify_all();
+    state_->changed.wait(lock, [this] { return state_->mayFinish; });
+  }
+
+private:
+  std::shared_ptr<BlockingSinkState> state_;
 };
 
 class StructuredSink : public LogSink {
@@ -395,6 +418,117 @@ TEST(LoggerDesignTest, PublicCustomSinkReceivesMessages) {
 
   ASSERT_EQ(sink->messages.size(), 1U);
   EXPECT_NE(sink->messages.front().find("42"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, RemovesOnlyTheSelectedSink) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> removedSink   = std::make_shared<RecordingSink>();
+  const std::shared_ptr<RecordingSink> remainingSink = std::make_shared<RecordingSink>();
+  const SinkHandle                     removedHandle = logger.addSink(removedSink);
+  logger.addSink(remainingSink);
+  logger.setLogLevel(LogLevel::DEBUG);
+
+  logger.log(LogLevel::INFO, "Before removal", "sinkTest");
+  EXPECT_TRUE(logger.removeSink(removedHandle));
+  logger.log(LogLevel::DEBUG, "After removal", "sinkTest");
+
+  ASSERT_EQ(removedSink->messages.size(), 1U);
+  EXPECT_NE(removedSink->messages[0].find("Before removal"), std::string::npos);
+  ASSERT_EQ(remainingSink->messages.size(), 2U);
+  EXPECT_NE(remainingSink->messages[1].find("After removal"), std::string::npos);
+  EXPECT_TRUE(logger.isEnabled(LogLevel::DEBUG));
+}
+
+TEST(LoggerDesignTest, RemovingUnknownOrAlreadyRemovedHandleIsHarmless) {
+  Logger                               logger(false);
+  Logger                               anotherLogger(false);
+  const std::shared_ptr<RecordingSink> sink          = std::make_shared<RecordingSink>();
+  const SinkHandle                     handle        = logger.addSink(sink);
+  const SinkHandle                     foreignHandle = anotherLogger.addSink(std::make_shared<RecordingSink>());
+
+  EXPECT_TRUE(handle.isValid());
+  EXPECT_FALSE(logger.removeSink(SinkHandle()));
+  EXPECT_FALSE(logger.removeSink(foreignHandle));
+  EXPECT_TRUE(logger.removeSink(handle));
+  EXPECT_FALSE(logger.removeSink(handle));
+}
+
+TEST_F(LoggerTest, DefaultConsoleSinkCanBeRemovedAndRestored) {
+  Logger           logger;
+  const SinkHandle defaultConsole = logger.getDefaultConsoleSinkHandle();
+
+  ASSERT_TRUE(defaultConsole.isValid());
+  EXPECT_TRUE(logger.removeSink(defaultConsole));
+  logger.log(LogLevel::INFO, "No console sink", "sinkTest");
+
+  const SinkHandle restoredConsole = logger.addConsoleSink();
+  ASSERT_TRUE(restoredConsole.isValid());
+  logger.setColorEnabled(false);
+  logger.log(LogLevel::INFO, "Console restored", "sinkTest");
+
+  const std::string output = capturedCout.str();
+  EXPECT_EQ(output.find("No console sink"), std::string::npos);
+  EXPECT_NE(output.find("Console restored"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, ClearSinksRemovesManagedMemorySinkAndAllowsItToBeEnabledAgain) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> original = logger.enableInMemorySink();
+  logger.log(LogLevel::INFO, "Before clear", "sinkTest");
+
+  logger.clearSinks();
+  logger.log(LogLevel::INFO, "After clear", "sinkTest");
+  const std::shared_ptr<InMemorySink> replacement = logger.enableInMemorySink();
+  logger.log(LogLevel::INFO, "After enable", "sinkTest");
+
+  ASSERT_EQ(original->getLogs().size(), 1U);
+  EXPECT_NE(original->getLogs()[0].find("Before clear"), std::string::npos);
+  ASSERT_EQ(replacement->getLogs().size(), 1U);
+  EXPECT_NE(replacement->getLogs()[0].find("After enable"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, SinkRemovalInsideScopeIsRestoredWithTheScope) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> sink   = std::make_shared<RecordingSink>();
+  const SinkHandle                     handle = logger.addSink(sink);
+
+  {
+    ScopedSettings settings = logger.scopedSettings();
+    EXPECT_TRUE(logger.removeSink(handle));
+    logger.log(LogLevel::INFO, "Hidden in scope", "sinkTest");
+  }
+  logger.log(LogLevel::INFO, "Visible after scope", "sinkTest");
+
+  ASSERT_EQ(sink->messages.size(), 1U);
+  EXPECT_NE(sink->messages[0].find("Visible after scope"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, RemovingSinkDuringWriteKeepsInProgressWriteAlive) {
+  Logger                                   logger(false);
+  const std::shared_ptr<BlockingSinkState> state        = std::make_shared<BlockingSinkState>();
+  std::shared_ptr<BlockingSink>            sink         = std::make_shared<BlockingSink>(state);
+  const std::weak_ptr<BlockingSink>        sinkLifetime = sink;
+  const SinkHandle                         handle       = logger.addSink(sink);
+
+  std::thread loggingThread([&logger] { logger.log(LogLevel::INFO, "In progress", "sinkTest"); });
+  {
+    std::unique_lock<std::mutex> lock(state->mutex);
+    state->changed.wait(lock, [&state] { return state->writeStarted; });
+  }
+
+  EXPECT_TRUE(logger.removeSink(handle));
+  sink.reset();
+  EXPECT_FALSE(sinkLifetime.expired());
+
+  {
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->mayFinish = true;
+  }
+  state->changed.notify_all();
+  loggingThread.join();
+
+  EXPECT_TRUE(sinkLifetime.expired());
+  EXPECT_FALSE(logger.removeSink(handle));
 }
 
 TEST(LoggerDesignTest, StructuredSinkReceivesLevelAndColor) {

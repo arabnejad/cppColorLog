@@ -246,6 +246,60 @@ for (const std::string &entry : memory->getLogs())
 Memory access returns a snapshot, so callers never retain an unlocked reference
 to the sink's internal storage.
 
+## Adding and removing sinks
+
+`addSink()` returns a `SinkHandle`. Keep this handle when you may need to remove
+that specific sink later:
+
+```cpp
+std::shared_ptr<MySink> sink = std::make_shared<MySink>();
+SinkHandle handle = LOGGER.addSink(sink);
+
+LOGGER_LOG(LogLevel::INFO, "Sent to MySink");
+LOGGER.removeSink(handle);
+LOGGER_LOG(LogLevel::INFO, "MySink no longer receives this");
+```
+
+`removeSink()` returns `true` when it removes a sink. It returns `false` and
+makes no changes when the handle is invalid, belongs to another logger, or has
+already been removed. Removing one sink does not change the log level, filters,
+colors, or other sinks.
+
+Use `clearSinks()` to remove every active sink. This includes the default console
+sink and the sink created by `enableInMemorySink()`. They can be added again:
+
+```cpp
+LOGGER.clearSinks();
+
+SinkHandle console = LOGGER.addConsoleSink();
+std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
+```
+
+The original console sink can also be removed individually:
+
+```cpp
+LOGGER.removeSink(LOGGER.getDefaultConsoleSinkHandle());
+```
+
+The file and memory convenience methods return their sink objects for their
+existing APIs. When an individual removal handle is needed, construct the sink
+and pass it to `addSink()` directly:
+
+```cpp
+std::shared_ptr<FileSink> file = std::make_shared<FileSink>("application.log");
+SinkHandle fileHandle = LOGGER.addSink(file);
+```
+
+Sink changes follow the same rules as other scoped settings. Removing or clearing
+sinks inside `ScopedSettings` affects only that temporary settings copy; leaving
+the scope restores the previous sink list.
+
+Adding, removing, and copying the active sink list are protected by the logger's
+settings mutex. A log call copies `shared_ptr`s to its selected sinks before
+writing. Therefore, removing a sink while another thread is already using it is
+safe: the in-progress write may finish, and the sink is destroyed only after that
+write releases its copy.
+
 ## Filtering selected levels
 
 The threshold and whitelist are both applied:
