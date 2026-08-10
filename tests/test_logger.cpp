@@ -70,25 +70,25 @@ public:
 };
 
 struct BlockingSinkState {
-  std::mutex              mutex;
-  std::condition_variable changed;
+  std::mutex              write_mux;
+  std::condition_variable write_cv;
   bool                    writeStarted = false;
   bool                    mayFinish    = false;
 };
 
 class BlockingSink : public LogSink {
 public:
-  explicit BlockingSink(const std::shared_ptr<BlockingSinkState> &state) : state_(state) {}
+  explicit BlockingSink(const std::shared_ptr<BlockingSinkState> &state) : m_state(state) {}
 
   void write(const std::string &) override {
-    std::unique_lock<std::mutex> lock(state_->mutex);
-    state_->writeStarted = true;
-    state_->changed.notify_all();
-    state_->changed.wait(lock, [this] { return state_->mayFinish; });
+    std::unique_lock<std::mutex> write_lck(m_state->write_mux);
+    m_state->writeStarted = true;
+    m_state->write_cv.notify_all();
+    m_state->write_cv.wait(write_lck, [this] { return m_state->mayFinish; });
   }
 
 private:
-  std::shared_ptr<BlockingSinkState> state_;
+  std::shared_ptr<BlockingSinkState> m_state;
 };
 
 class StructuredSink : public LogSink {
@@ -112,18 +112,18 @@ public:
 
 class ReentrantSink : public LogSink {
 public:
-  explicit ReentrantSink(Logger &logger) : logger_(logger) {}
+  explicit ReentrantSink(Logger &logger) : m_logger(logger) {}
 
   void write(const std::string &) override {
     ++messageCount;
     if (messageCount == 1)
-      logger_.log(LogLevel::INFO, "Nested message", "ReentrantSink");
+      m_logger.log(LogLevel::INFO, "Nested message", "ReentrantSink");
   }
 
   int messageCount = 0;
 
 private:
-  Logger &logger_;
+  Logger &m_logger;
 };
 
 struct StreamCountingMessage {
@@ -202,6 +202,80 @@ TEST_F(LoggerTest, LogsToFileWithoutColor) {
   EXPECT_NE(content.find("File log test"), std::string::npos);
   EXPECT_EQ(content.find("\033["), std::string::npos);
 }
+
+TEST_F(LoggerTest, FileSinkAppendModePreservesExistingContent) {
+  {
+    std::ofstream existingFile(logFile.c_str(), std::ios::trunc);
+    existingFile << "Existing content\n";
+  }
+
+  FileSink sink(logFile, FileOpenMode::APPEND);
+  ASSERT_TRUE(sink.isOpen());
+  sink.write("Appended content");
+  ASSERT_TRUE(sink.flush());
+
+  const std::string content = readFile();
+  EXPECT_NE(content.find("Existing content"), std::string::npos);
+  EXPECT_NE(content.find("Appended content"), std::string::npos);
+  EXPECT_FALSE(sink.hasError());
+}
+
+TEST_F(LoggerTest, FileSinkTruncateModeClearsExistingContent) {
+  {
+    std::ofstream existingFile(logFile.c_str(), std::ios::trunc);
+    existingFile << "Content to remove\n";
+  }
+
+  FileSink sink(logFile, FileOpenMode::TRUNCATE);
+  ASSERT_TRUE(sink.isOpen());
+  sink.write("Replacement content");
+  ASSERT_TRUE(sink.flush());
+
+  const std::string content = readFile();
+  EXPECT_EQ(content.find("Content to remove"), std::string::npos);
+  EXPECT_NE(content.find("Replacement content"), std::string::npos);
+}
+
+TEST_F(LoggerTest, LoggerFlushWritesAllActiveFileSinks) {
+  Logger                          logger(false);
+  const std::shared_ptr<FileSink> sink = logger.addFileSink(logFile, FileOpenMode::TRUNCATE);
+  ASSERT_TRUE(sink->isOpen());
+
+  logger.log(LogLevel::INFO, "Flushed through logger", "flushTest");
+
+  EXPECT_TRUE(logger.flush());
+  EXPECT_FALSE(sink->hasError());
+  EXPECT_NE(readFile().find("Flushed through logger"), std::string::npos);
+}
+
+TEST_F(LoggerTest, FileSinkReportsOpenFailureAndKeepsFirstError) {
+  const std::string invalidPath = logFile + "/cannot-open.log";
+  FileSink          sink(invalidPath, FileOpenMode::APPEND);
+
+  EXPECT_FALSE(sink.isOpen());
+  ASSERT_TRUE(sink.hasError());
+  const std::string openError = sink.getLastError();
+  EXPECT_NE(openError.find("Failed to open"), std::string::npos);
+  EXPECT_NE(openError.find(invalidPath), std::string::npos);
+
+  sink.write("Ignored after open failure");
+  EXPECT_FALSE(sink.flush());
+  EXPECT_EQ(sink.getLastError(), openError);
+}
+
+#if defined(__linux__)
+TEST(FileSinkFailureTest, ReportsFailureWhenFileStopsAcceptingWrites) {
+  Logger                          logger(false);
+  const std::shared_ptr<FileSink> sink = logger.addFileSink("/dev/full");
+  ASSERT_TRUE(sink->isOpen());
+
+  logger.log(LogLevel::INFO, "This write cannot complete", "failureTest");
+
+  EXPECT_TRUE(sink->hasError());
+  EXPECT_NE(sink->getLastError().find("Failed to write"), std::string::npos);
+  EXPECT_FALSE(logger.flush());
+}
+#endif
 
 TEST_F(LoggerTest, LogLevelThresholdWorks) {
   LOGGER.addFileSink(logFile);
@@ -512,8 +586,8 @@ TEST(LoggerDesignTest, RemovingSinkDuringWriteKeepsInProgressWriteAlive) {
 
   std::thread loggingThread([&logger] { logger.log(LogLevel::INFO, "In progress", "sinkTest"); });
   {
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->changed.wait(lock, [&state] { return state->writeStarted; });
+    std::unique_lock<std::mutex> write_lck(state->write_mux);
+    state->write_cv.wait(write_lck, [&state] { return state->writeStarted; });
   }
 
   EXPECT_TRUE(logger.removeSink(handle));
@@ -521,10 +595,10 @@ TEST(LoggerDesignTest, RemovingSinkDuringWriteKeepsInProgressWriteAlive) {
   EXPECT_FALSE(sinkLifetime.expired());
 
   {
-    std::lock_guard<std::mutex> lock(state->mutex);
+    std::lock_guard<std::mutex> write_lck(state->write_mux);
     state->mayFinish = true;
   }
-  state->changed.notify_all();
+  state->write_cv.notify_all();
   loggingThread.join();
 
   EXPECT_TRUE(sinkLifetime.expired());

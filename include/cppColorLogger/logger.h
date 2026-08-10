@@ -53,6 +53,10 @@ enum class LogLevel { ALWAYS, FATAL, ERROR, WARN, INFO, DEBUG, VERBOSE };
 // ANSI colors, and DISABLED always emits plain text.
 enum class ColorMode { AUTOMATIC, ENABLED, DISABLED };
 
+// APPEND preserves existing file contents. TRUNCATE clears the file when the
+// sink opens it.
+enum class FileOpenMode { APPEND, TRUNCATE };
+
 inline const char *toString(LogLevel level) {
   switch (level) {
   case LogLevel::ALWAYS:
@@ -604,21 +608,21 @@ class Logger;
  */
 class SinkHandle {
 public:
-  SinkHandle() : logger_(nullptr), id_(0) {}
+  SinkHandle() : m_logger(nullptr), m_id(0) {}
 
   // True means the handle was created by a Logger. It does not guarantee that
   // the sink is still registered, because it may already have been removed.
   bool isValid() const {
-    return logger_ != nullptr;
+    return m_logger != nullptr;
   }
 
 private:
   friend class Logger;
 
-  SinkHandle(const Logger *logger, std::size_t id) : logger_(logger), id_(id) {}
+  SinkHandle(const Logger *logger, std::size_t id) : m_logger(logger), m_id(id) {}
 
-  const Logger *logger_;
-  std::size_t   id_;
+  const Logger *m_logger;
+  std::size_t   m_id;
 };
 
 class LogSink {
@@ -627,6 +631,11 @@ public:
 
   virtual bool supportsColor() const {
     return false;
+  }
+
+  // Sinks without buffered output have nothing to flush and succeed by default.
+  virtual bool flush() {
+    return true;
   }
 
   // This string-only method keeps existing custom sinks source-compatible.
@@ -650,57 +659,107 @@ public:
   }
 
   void write(const LogEntry &entry) override {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> console_lck(m_console_mux);
     if (detail::shouldUseConsoleColor(entry.colorMode) && !entry.color.empty())
       std::cout << entry.color << entry.text << Color::RESET << std::endl;
     else
       std::cout << entry.text << std::endl;
   }
 
+  bool flush() override {
+    std::lock_guard<std::mutex> console_lck(m_console_mux);
+    std::cout.flush();
+    return static_cast<bool>(std::cout);
+  }
+
 private:
-  std::mutex mutex_;
+  std::mutex m_console_mux;
 };
 
+/**
+ * Writes complete log entries to a file and stores the first I/O error.
+ *
+ * After an open, write, or flush failure, later writes are ignored. Check
+ * hasError() and getLastError(), then replace the sink if recovery is needed.
+ */
 class FileSink : public LogSink {
 public:
-  explicit FileSink(const std::string &filename) : file_(filename.c_str(), std::ios::app) {}
+  explicit FileSink(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) : m_filename(filename) {
+    const std::ios::openmode openMode =
+        std::ios::out | (mode == FileOpenMode::APPEND ? std::ios::app : std::ios::trunc);
+    m_file.open(filename.c_str(), openMode);
+    if (!m_file.is_open())
+      m_lastError = "Failed to open log file '" + m_filename + "'.";
+  }
 
   void write(const std::string &message) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (file_)
-      file_ << message << std::endl;
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    if (!m_lastError.empty())
+      return;
+
+    m_file << message << std::endl;
+    if (!m_file)
+      m_lastError = "Failed to write to log file '" + m_filename + "'.";
+  }
+
+  /** Flushes buffered output and reports whether the operation succeeded. */
+  bool flush() override {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    if (!m_lastError.empty())
+      return false;
+
+    m_file.flush();
+    if (!m_file) {
+      m_lastError = "Failed to flush log file '" + m_filename + "'.";
+      return false;
+    }
+    return true;
   }
 
   bool isOpen() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return file_.is_open();
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return m_file.is_open();
+  }
+
+  /** Returns true after an open, write, or flush operation has failed. */
+  bool hasError() const {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return !m_lastError.empty();
+  }
+
+  /** Returns a copy of the first error reported by this sink. */
+  std::string getLastError() const {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return m_lastError;
   }
 
 private:
-  mutable std::mutex mutex_;
-  std::ofstream      file_;
+  mutable std::mutex m_file_mux;
+  std::ofstream      m_file;
+  std::string        m_filename;
+  std::string        m_lastError;
 };
 
 class InMemorySink : public LogSink {
 public:
   void write(const std::string &message) override {
-    std::lock_guard<std::mutex> lock(mutex_);
-    logs_.push_back(message);
+    std::lock_guard<std::mutex> logs_lck(m_logs_mux);
+    m_logs.push_back(message);
   }
 
   std::vector<std::string> getLogs() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return logs_;
+    std::lock_guard<std::mutex> logs_lck(m_logs_mux);
+    return m_logs;
   }
 
   void clear() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    logs_.clear();
+    std::lock_guard<std::mutex> logs_lck(m_logs_mux);
+    m_logs.clear();
   }
 
 private:
-  std::vector<std::string> logs_;
-  mutable std::mutex       mutex_;
+  std::vector<std::string> m_logs;
+  mutable std::mutex       m_logs_mux;
 };
 
 struct LoggerState {
@@ -730,9 +789,9 @@ class Logger {
 
 public:
   // Public construction enables isolated logger instances in tests and tools.
-  explicit Logger(bool addDefaultConsoleSink = true) : nextSinkId_(1) {
+  explicit Logger(bool addDefaultConsoleSink = true) : m_nextSinkId(1) {
     if (addDefaultConsoleSink)
-      defaultConsoleSinkHandle_ = addSinkLocked(globalState_, std::make_shared<ConsoleSink>());
+      m_defaultConsoleSinkHandle = addSinkLocked(m_globalState, std::make_shared<ConsoleSink>());
   }
 
   static Logger &getInstance() {
@@ -744,13 +803,13 @@ public:
   Logger &operator=(const Logger &) = delete;
 
   void setLogLevel(LogLevel level) {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).logLevel = level;
   }
 
   void setLevelColor(LogLevel level, const std::string &color) {
     const std::size_t           index = levelIndex(level);
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
     if (index < state.colors.size())
       state.colors[index] = color;
@@ -759,13 +818,13 @@ public:
   // Explicitly enable or disable ANSI color for the calling thread's active
   // settings. This choice overrides terminal detection and NO_COLOR.
   void setColorEnabled(bool enabled) {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).colorMode = enabled ? ColorMode::ENABLED : ColorMode::DISABLED;
   }
 
   // Return to automatic terminal detection and NO_COLOR handling.
   void useAutomaticColor() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).colorMode = ColorMode::AUTOMATIC;
   }
 
@@ -778,7 +837,7 @@ public:
   SinkHandle addSink(const std::shared_ptr<LogSink> &sink) {
     if (!sink)
       return SinkHandle();
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     return addSinkLocked(activeStateLocked(std::this_thread::get_id()), sink);
   }
 
@@ -794,7 +853,7 @@ public:
 
   /** Returns the handle created for this Logger's initial console sink. */
   SinkHandle getDefaultConsoleSinkHandle() const {
-    return defaultConsoleSinkHandle_;
+    return m_defaultConsoleSinkHandle;
   }
 
   /**
@@ -805,12 +864,12 @@ public:
    * its shared ownership keeps that write safe.
    */
   bool removeSink(const SinkHandle &handle) {
-    if (handle.logger_ != this)
+    if (handle.m_logger != this)
       return false;
 
-    std::lock_guard<std::mutex>                               lock(stateMutex_);
+    std::lock_guard<std::mutex>                               state_lck(m_state_mux);
     LoggerState                                              &state = activeStateLocked(std::this_thread::get_id());
-    std::map<std::size_t, std::shared_ptr<LogSink>>::iterator sink  = state.sinks.find(handle.id_);
+    std::map<std::size_t, std::shared_ptr<LogSink>>::iterator sink  = state.sinks.find(handle.m_id);
     if (sink == state.sinks.end())
       return false;
 
@@ -828,25 +887,26 @@ public:
    * addConsoleSink() or enableInMemorySink() to add either one again.
    */
   void clearSinks() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
     state.sinks.clear();
     state.inMemorySink.reset();
   }
 
-  std::shared_ptr<FileSink> addFileSink(const std::string &filename) {
-    const std::shared_ptr<FileSink> sink = std::make_shared<FileSink>(filename);
+  /** Adds a file sink in append mode by default and returns it for status checks. */
+  std::shared_ptr<FileSink> addFileSink(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) {
+    const std::shared_ptr<FileSink> sink = std::make_shared<FileSink>(filename, mode);
     addSink(sink);
     return sink;
   }
 
   // Compatibility name: file output has always appended another sink.
-  void setFileOutput(const std::string &filename) {
-    addFileSink(filename);
+  void setFileOutput(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) {
+    addFileSink(filename, mode);
   }
 
   std::shared_ptr<InMemorySink> enableInMemorySink() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
     if (!state.inMemorySink) {
       state.inMemorySink = std::make_shared<InMemorySink>();
@@ -858,19 +918,41 @@ public:
   std::vector<std::string> getInMemoryLogs() const {
     std::shared_ptr<InMemorySink> sink;
     {
-      std::lock_guard<std::mutex> lock(stateMutex_);
+      std::lock_guard<std::mutex> state_lck(m_state_mux);
       sink = activeStateLocked(std::this_thread::get_id()).inMemorySink;
     }
     return sink ? sink->getLogs() : std::vector<std::string>();
   }
 
+  /**
+   * @brief Flushes every active sink and reports whether all flushes succeeded.
+   *
+   * The sink list is copied before flushing, so concurrent sink removal is safe.
+   * A sink removed after the copy may receive this final flush.
+   */
+  bool flush() {
+    std::vector<std::shared_ptr<LogSink>> sinks;
+    {
+      std::lock_guard<std::mutex> state_lck(m_state_mux);
+      copySinksLocked(activeStateLocked(std::this_thread::get_id()), sinks);
+    }
+
+    bool                                  succeeded = true;
+    std::lock_guard<std::recursive_mutex> output_lck(m_output_mux);
+    for (std::vector<std::shared_ptr<LogSink>>::iterator sink = sinks.begin(); sink != sinks.end(); ++sink) {
+      if (!(*sink)->flush())
+        succeeded = false;
+    }
+    return succeeded;
+  }
+
   void setFilterLevels(std::initializer_list<LogLevel> levels) {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).filterLevels = std::set<LogLevel>(levels.begin(), levels.end());
   }
 
   void clearFilterLevels() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).filterLevels.clear();
   }
 
@@ -879,10 +961,10 @@ public:
   // copy the global settings. Changes then affect only this temporary copy
   // until popLogSetting() restores the previous settings.
   void pushLogSetting() {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     const std::thread::id       threadId = std::this_thread::get_id();
-    std::vector<LoggerState>   &stack    = scopedStateStacks_[threadId];
-    stack.push_back(stack.empty() ? globalState_ : stack.back());
+    std::vector<LoggerState>   &stack    = m_scopedStateStacks[threadId];
+    stack.push_back(stack.empty() ? m_globalState : stack.back());
   }
 
   void popLogSetting() {
@@ -902,7 +984,7 @@ public:
    * @return True when the level passes both the threshold and filter.
    */
   bool isEnabled(LogLevel level) const {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     return acceptsLevel(activeStateLocked(std::this_thread::get_id()), level);
   }
 
@@ -924,7 +1006,7 @@ private:
   friend class ScopedSettings;
 
   SinkHandle addSinkLocked(LoggerState &state, const std::shared_ptr<LogSink> &sink) {
-    const std::size_t id = nextSinkId_++;
+    const std::size_t id = m_nextSinkId++;
     state.sinks[id]      = sink;
     return SinkHandle(this, id);
   }
@@ -936,6 +1018,13 @@ private:
         return true;
     }
     return false;
+  }
+
+  static void copySinksLocked(const LoggerState &state, std::vector<std::shared_ptr<LogSink>> &sinks) {
+    sinks.reserve(state.sinks.size());
+    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.sinks.begin();
+         sink != state.sinks.end(); ++sink)
+      sinks.push_back(sink->second);
   }
 
   static std::size_t levelIndex(LogLevel level) {
@@ -971,16 +1060,16 @@ private:
     return stream.str();
   }
 
-  // The caller must hold stateMutex_. Setters and logging use the current
+  // The caller must hold m_state_mux. Setters and logging use the current
   // thread's top override when present, otherwise they use the global state.
   LoggerState &activeStateLocked(const std::thread::id &threadId) {
-    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = scopedStateStacks_.find(threadId);
-    return stack == scopedStateStacks_.end() || stack->second.empty() ? globalState_ : stack->second.back();
+    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadId);
+    return stack == m_scopedStateStacks.end() || stack->second.empty() ? m_globalState : stack->second.back();
   }
 
   const LoggerState &activeStateLocked(const std::thread::id &threadId) const {
-    std::map<std::thread::id, std::vector<LoggerState>>::const_iterator stack = scopedStateStacks_.find(threadId);
-    return stack == scopedStateStacks_.end() || stack->second.empty() ? globalState_ : stack->second.back();
+    std::map<std::thread::id, std::vector<LoggerState>>::const_iterator stack = m_scopedStateStacks.find(threadId);
+    return stack == m_scopedStateStacks.end() || stack->second.empty() ? m_globalState : stack->second.back();
   }
 
   // Keep the threshold and filter rule in one place for isEnabled() and log().
@@ -989,20 +1078,20 @@ private:
   }
 
   void popLogSettingForThread(const std::thread::id &threadId) {
-    std::lock_guard<std::mutex>                                   lock(stateMutex_);
-    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = scopedStateStacks_.find(threadId);
-    if (stack == scopedStateStacks_.end() || stack->second.empty())
+    std::lock_guard<std::mutex>                                   state_lck(m_state_mux);
+    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadId);
+    if (stack == m_scopedStateStacks.end() || stack->second.empty())
       return;
 
     stack->second.pop_back();
     if (stack->second.empty())
-      scopedStateStacks_.erase(stack);
+      m_scopedStateStacks.erase(stack);
   }
 
   // Check the level and copy the selected color and sinks while holding the
   // state lock. Message formatting and output happen after releasing the lock.
   bool captureOutputSettings(LogLevel level, OutputSettings &output) const {
-    std::lock_guard<std::mutex> lock(stateMutex_);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
     const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
     if (!acceptsLevel(state, level))
       return false;
@@ -1010,10 +1099,7 @@ private:
     const std::size_t index = levelIndex(level);
     output.color            = index < state.colors.size() ? state.colors[index] : Color::WHITE;
     output.colorMode        = state.colorMode;
-    output.sinks.reserve(state.sinks.size());
-    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.sinks.begin();
-         sink != state.sinks.end(); ++sink)
-      output.sinks.push_back(sink->second);
+    copySinksLocked(state, output.sinks);
     return true;
   }
 
@@ -1022,37 +1108,37 @@ private:
     const LogEntry entry = {level, formatLog(level, message, function, className), output.color, output.colorMode};
 
     // Keep complete entries ordered without holding the configuration lock during I/O.
-    std::lock_guard<std::recursive_mutex> outputLock(outputMutex_);
+    std::lock_guard<std::recursive_mutex> output_lck(m_output_mux);
     for (std::vector<std::shared_ptr<LogSink>>::const_iterator sink = output.sinks.begin(); sink != output.sinks.end();
          ++sink)
       (*sink)->write(entry);
   }
 
-  mutable std::mutex   stateMutex_;
-  std::recursive_mutex outputMutex_;
-  LoggerState          globalState_;
-  std::size_t          nextSinkId_;
-  SinkHandle           defaultConsoleSinkHandle_;
+  mutable std::mutex   m_state_mux;
+  std::recursive_mutex m_output_mux;
+  LoggerState          m_globalState;
+  std::size_t          m_nextSinkId;
+  SinkHandle           m_defaultConsoleSinkHandle;
 
   // Each thread owns an independent nested override stack. The map is stored
   // on the logger so a moved ScopedSettings guard can still remove the stack
   // created by its original thread.
-  std::map<std::thread::id, std::vector<LoggerState>> scopedStateStacks_;
+  std::map<std::thread::id, std::vector<LoggerState>> m_scopedStateStacks;
 };
 
 class ScopedSettings {
 public:
-  explicit ScopedSettings(Logger &logger) : logger_(&logger), ownerThread_(std::this_thread::get_id()) {
-    logger_->pushLogSetting();
+  explicit ScopedSettings(Logger &logger) : m_logger(&logger), m_ownerThread(std::this_thread::get_id()) {
+    m_logger->pushLogSetting();
   }
 
   ~ScopedSettings() {
-    if (logger_)
-      logger_->popLogSettingForThread(ownerThread_);
+    if (m_logger)
+      m_logger->popLogSettingForThread(m_ownerThread);
   }
 
-  ScopedSettings(ScopedSettings &&other) : logger_(other.logger_), ownerThread_(other.ownerThread_) {
-    other.logger_ = nullptr;
+  ScopedSettings(ScopedSettings &&other) : m_logger(other.m_logger), m_ownerThread(other.m_ownerThread) {
+    other.m_logger = nullptr;
   }
 
   ScopedSettings(const ScopedSettings &)            = delete;
@@ -1060,10 +1146,10 @@ public:
   ScopedSettings &operator=(ScopedSettings &&)      = delete;
 
 private:
-  Logger *logger_;
+  Logger *m_logger;
   // Remember the creating thread so destruction restores that same stack even
   // if this movable guard is transferred before it is destroyed.
-  std::thread::id ownerThread_;
+  std::thread::id m_ownerThread;
 };
 
 inline ScopedSettings Logger::scopedSettings() {
@@ -1080,6 +1166,7 @@ inline Logger &defaultLogger() {
 using LogLevel       = cppcolorlog::LogLevel;
 using LOGLEVELL      = cppcolorlog::LogLevel;
 using ColorMode      = cppcolorlog::ColorMode;
+using FileOpenMode   = cppcolorlog::FileOpenMode;
 using LogEntry       = cppcolorlog::LogEntry;
 using SinkHandle     = cppcolorlog::SinkHandle;
 using LogSink        = cppcolorlog::LogSink;

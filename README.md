@@ -231,10 +231,17 @@ step-by-step examples. The complete runnable example is
 ## File and memory sinks
 
 ```cpp
-LOGGER.addFileSink("application.log");
+std::shared_ptr<FileSink> file =
+    LOGGER.addFileSink("application.log", FileOpenMode::APPEND);
+
+if (!file->isOpen())
+  std::cerr << file->getLastError() << '\n';
 
 std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
 LOGGER_LOG(LogLevel::INFO, "Stored by every active sink");
+
+if (!LOGGER.flush())
+  std::cerr << file->getLastError() << '\n';
 
 for (const std::string &entry : memory->getLogs())
   std::cout << entry << '\n';
@@ -245,6 +252,43 @@ for (const std::string &entry : memory->getLogs())
 
 Memory access returns a snapshot, so callers never retain an unlocked reference
 to the sink's internal storage.
+
+### File open modes
+
+The default mode is `FileOpenMode::APPEND`, which keeps existing content and
+writes new entries at the end. `FileOpenMode::TRUNCATE` clears existing content
+when the sink opens the file:
+
+```cpp
+LOGGER.addFileSink("history.log"); // APPEND is the default
+LOGGER.addFileSink("latest.log", FileOpenMode::TRUNCATE);
+```
+
+### Flushing and detecting file errors
+
+`FileSink::flush()` flushes one file sink. `Logger::flush()` flushes every active
+sink and returns `true` only when every sink succeeds. File entries continue to
+be flushed after each write for compatibility; the explicit methods provide a
+clear point where an application can check the result.
+
+File errors are never silently cleared:
+
+- `isOpen()` tells whether the file was opened.
+- `hasError()` reports whether opening, writing, or flushing has failed.
+- `getLastError()` returns a readable description of the first failure.
+- `flush()` returns `false` after a failure.
+
+When a write or flush fails after the file was opened, the error remains stored
+and later writes are ignored. The sink does not automatically reopen the file,
+because doing so could hide missing entries or write to an unexpected file. The
+application can inspect the error, remove the failed sink, and add a new one.
+Depending on the operating system, deleting or renaming an open file may not
+cause an immediate failure because the process can still own an open file
+handle. Errors are reported when the operating system rejects a write or flush.
+
+Built-in size-based and time-based rotation are not enabled. Applications that
+need rotation can provide a custom `LogSink`; each `write()` call receives one
+complete log entry.
 
 ## Adding and removing sinks
 
@@ -415,10 +459,10 @@ settings stack. In simplified form, the lookup works like this:
 ```cpp
 LoggerState &activeStateForCurrentThread() {
   const std::thread::id threadId = std::this_thread::get_id();
-  const auto stack = scopedStateStacks_.find(threadId);
+  const auto stack = m_scopedStateStacks.find(threadId);
 
-  if (stack == scopedStateStacks_.end() || stack->second.empty())
-    return globalState_;
+  if (stack == m_scopedStateStacks.end() || stack->second.empty())
+    return m_globalState;
 
   return stack->second.back();
 }
