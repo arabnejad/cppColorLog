@@ -344,6 +344,72 @@ writing. Therefore, removing a sink while another thread is already using it is
 safe: the in-progress write may finish, and the sink is destroyed only after that
 write releases its copy.
 
+## Structured logging fields
+
+Use `LOGGER_LOG_FIELDS` when a message has values that a sink may need to inspect
+separately:
+
+```cpp
+LOGGER_LOG_FIELDS(
+    LogLevel::INFO,
+    "Request completed",
+    {{"status", "200"}, {"duration_ms", "14"}});
+```
+
+When fields are written directly in the logging call, the outer `{}` contains
+the complete field list and each inner `{}` contains one key/value pair. If the
+fields are already stored in a `LogFields` variable, pass the variable without
+additional braces:
+
+```cpp
+LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
+LOGGER_LOG_FIELDS(LogLevel::INFO, "Request completed", fields);
+```
+
+Use `LOGGER_LOG` instead when the message has no fields.
+
+The console, file, and memory sinks produce readable text:
+
+```text
+[2026-09-05 14:30:12] [INFO] [handleRequest] Request completed [status=200, duration_ms=14]
+```
+
+The timestamp and automatically detected context depend on when and where the
+macro is called. A normal message without fields keeps its existing format.
+
+You can also pass `LogFields` to a specific logger instance:
+
+```cpp
+LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
+logger.log(LogLevel::INFO, "Request completed", fields);
+```
+
+Example output:
+
+```text
+[2026-09-05 14:30:12] [INFO] [] Request completed [status=200, duration_ms=14]
+```
+
+The context is empty (`[]`) because a direct `logger.log()` call does not
+automatically detect the calling function. Use `LOGGER_LOG_FIELDS` when the
+function or class-method name should be included automatically.
+
+Keys and values are strings, and their insertion order is preserved. Keeping the
+field type this small makes initializer-list use predictable in C++11.
+
+A sink that overrides `write(const LogEntry&)` receives these values separately:
+
+- `timestamp`
+- `level`
+- `message`
+- `function` and `className`
+- `fields`
+- `text`, containing the existing human-readable rendering
+
+The project does not include a JSON sink yet. JSON string escaping and entry
+serialization are implemented and tested internally so a future JSON sink will
+not need to parse `text`.
+
 ## Filtering selected levels
 
 The threshold and whitelist are both applied:
@@ -508,9 +574,9 @@ public:
 LOGGER.addSink(std::make_shared<MySink>());
 ```
 
-A sink that needs the level or selected color can additionally override
-`write(const LogEntry&)`. The logger passes structured entries directly; sinks
-do not parse formatted text to recover the level.
+A sink that needs metadata or fields can additionally override
+`write(const LogEntry&)`. The logger passes the timestamp, level, original
+message, source context, fields, selected color, and human-readable text directly.
 
 ## Isolated logger instances
 

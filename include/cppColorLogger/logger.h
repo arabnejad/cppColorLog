@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <typeinfo>
+#include <utility>
 #include <vector>
 
 #if defined(__GNUG__)
@@ -56,6 +57,10 @@ enum class ColorMode { AUTOMATIC, ENABLED, DISABLED };
 // APPEND preserves existing file contents. TRUNCATE clears the file when the
 // sink opens it.
 enum class FileOpenMode { APPEND, TRUNCATE };
+
+// A vector keeps fields in the order supplied by the caller. Using strings for
+// both parts keeps the C++11 API small and predictable.
+using LogFields = std::vector<std::pair<std::string, std::string>>;
 
 inline const char *toString(LogLevel level) {
   switch (level) {
@@ -588,14 +593,90 @@ inline bool shouldUseConsoleColor(ColorMode mode) {
 
 } // namespace detail
 
-// Sinks receive the rendered text and the metadata needed for output-specific
-// decisions. They never need to parse the formatted message.
+// Existing sinks can continue using text. Structured sinks can use the separate
+// values below without parsing that human-readable text.
 struct LogEntry {
-  LogLevel    level;
-  std::string text;
-  std::string color;
-  ColorMode   colorMode;
+  LogLevel    level;     // Message severity, such as INFO, WARN, or ERROR.
+  std::string text;      // Complete human-readable line that a basic sink can write directly.
+  std::string color;     // ANSI color selected for this level; used by color-capable sinks.
+  ColorMode   colorMode; // Determines whether console color is automatic, enabled, or disabled.
+  std::string timestamp; // Time when the entry was created, without surrounding brackets.
+  std::string message;   // Original message before the logger adds metadata and fields.
+  std::string function;  // Function that created the entry; empty when no context was provided.
+  std::string className; // Class containing the function; empty for a standalone function.
+  LogFields   fields;    // Structured key/value data that sinks can inspect without parsing text.
 };
+
+namespace detail {
+
+/** Combines separate class and function names for display and serialization. */
+inline std::string contextName(const std::string &function, const std::string &className) {
+  return className.empty() ? function : className + "::" + function;
+}
+
+/** Escapes one string so it can be safely placed between JSON quotes. */
+inline std::string escapeJsonString(const std::string &value) {
+  static const char hexadecimal[] = "0123456789abcdef";
+  std::string       escaped;
+
+  for (std::string::const_iterator character = value.begin(); character != value.end(); ++character) {
+    const unsigned char byte = static_cast<unsigned char>(*character);
+    switch (byte) {
+    case '"':
+      escaped += "\\\"";
+      break;
+    case '\\':
+      escaped += "\\\\";
+      break;
+    case '\b':
+      escaped += "\\b";
+      break;
+    case '\f':
+      escaped += "\\f";
+      break;
+    case '\n':
+      escaped += "\\n";
+      break;
+    case '\r':
+      escaped += "\\r";
+      break;
+    case '\t':
+      escaped += "\\t";
+      break;
+    default:
+      if (byte < 0x20) {
+        const char unicodeEscape[] = {'\\', 'u', '0', '0', hexadecimal[byte >> 4], hexadecimal[byte & 0x0f]};
+        escaped.append(unicodeEscape, sizeof(unicodeEscape));
+      } else {
+        escaped += static_cast<char>(byte);
+      }
+    }
+  }
+  return escaped;
+}
+
+/**
+ * Serializes an entry for testing and future JSON sinks.
+ *
+ * This helper only creates JSON text; it does not write to a file. Fields are
+ * emitted in their original order.
+ */
+inline std::string serializeLogEntryToJson(const LogEntry &entry) {
+  std::ostringstream json;
+  json << "{\"timestamp\":\"" << escapeJsonString(entry.timestamp) << "\",\"level\":\"" << toString(entry.level)
+       << "\",\"context\":\"" << escapeJsonString(contextName(entry.function, entry.className)) << "\",\"message\":\""
+       << escapeJsonString(entry.message) << "\",\"fields\":{";
+
+  for (LogFields::const_iterator field = entry.fields.begin(); field != entry.fields.end(); ++field) {
+    if (field != entry.fields.begin())
+      json << ',';
+    json << '"' << escapeJsonString(field->first) << "\":\"" << escapeJsonString(field->second) << '"';
+  }
+  json << "}}";
+  return json.str();
+}
+
+} // namespace detail
 
 class Logger;
 
@@ -654,7 +735,8 @@ public:
   }
 
   void write(const std::string &message) override {
-    const LogEntry entry = {LogLevel::ALWAYS, message, Color::WHITE, ColorMode::AUTOMATIC};
+    const LogEntry entry = {LogLevel::ALWAYS, message, Color::WHITE, ColorMode::AUTOMATIC, "",
+                            message,          "",      "",           LogFields()};
     write(entry);
   }
 
@@ -990,6 +1072,22 @@ public:
 
   template <typename T>
   void log(LogLevel level, const T &message, const std::string &function = "", const std::string &className = "") {
+    logImpl(level, message, LogFields(), function, className);
+  }
+
+  /** Logs a message with ordered key/value fields for structured sinks. */
+  template <typename T>
+  void log(LogLevel level, const T &message, const LogFields &fields, const std::string &function = "",
+           const std::string &className = "") {
+    logImpl(level, message, fields, function, className);
+  }
+
+private:
+  friend class ScopedSettings;
+
+  template <typename T>
+  void logImpl(LogLevel level, const T &message, const LogFields &fields, const std::string &function,
+               const std::string &className) {
     // Avoid converting a rejected value to text. Expressions passed as
     // `message` have already been evaluated by the caller; use isEnabled()
     // before the call when creating the value itself is expensive.
@@ -999,11 +1097,8 @@ public:
 
     std::ostringstream stream;
     stream << message;
-    writeToSinks(level, stream.str(), function, className, output);
+    writeToSinks(level, stream.str(), fields, function, className, output);
   }
-
-private:
-  friend class ScopedSettings;
 
   SinkHandle addSinkLocked(LoggerState &state, const std::shared_ptr<LogSink> &sink) {
     const std::size_t id = m_nextSinkId++;
@@ -1041,22 +1136,30 @@ private:
     return result;
   }
 
-  static std::string formatLog(LogLevel level, const std::string &message, const std::string &function,
-                               const std::string &className) {
+  static std::string currentTimestamp() {
     const std::chrono::system_clock::time_point now      = std::chrono::system_clock::now();
     const std::time_t                           time     = std::chrono::system_clock::to_time_t(now);
     const std::tm                               timeInfo = localTime(time);
 
     char timestamp[32] = {};
     std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &timeInfo);
+    return timestamp;
+  }
 
+  static std::string formatLog(const LogEntry &entry) {
     std::ostringstream stream;
-    stream << '[' << timestamp << "] [" << toString(level) << "] ";
-    if (!className.empty())
-      stream << '[' << className << "::" << function << "] ";
-    else
-      stream << '[' << function << "] ";
-    stream << message;
+    stream << '[' << entry.timestamp << "] [" << toString(entry.level) << "] ["
+           << detail::contextName(entry.function, entry.className) << "] " << entry.message;
+
+    if (!entry.fields.empty()) {
+      stream << " [";
+      for (LogFields::const_iterator field = entry.fields.begin(); field != entry.fields.end(); ++field) {
+        if (field != entry.fields.begin())
+          stream << ", ";
+        stream << field->first << '=' << field->second;
+      }
+      stream << ']';
+    }
     return stream.str();
   }
 
@@ -1103,9 +1206,11 @@ private:
     return true;
   }
 
-  void writeToSinks(LogLevel level, const std::string &message, const std::string &function,
+  void writeToSinks(LogLevel level, const std::string &message, const LogFields &fields, const std::string &function,
                     const std::string &className, const OutputSettings &output) {
-    const LogEntry entry = {level, formatLog(level, message, function, className), output.color, output.colorMode};
+    LogEntry entry = {level,    "",        output.color, output.colorMode, currentTimestamp(), message,
+                      function, className, fields};
+    entry.text     = formatLog(entry);
 
     // Keep complete entries ordered without holding the configuration lock during I/O.
     std::lock_guard<std::recursive_mutex> output_lck(m_output_mux);
@@ -1167,6 +1272,7 @@ using LogLevel       = cppcolorlog::LogLevel;
 using LOGLEVELL      = cppcolorlog::LogLevel;
 using ColorMode      = cppcolorlog::ColorMode;
 using FileOpenMode   = cppcolorlog::FileOpenMode;
+using LogFields      = cppcolorlog::LogFields;
 using LogEntry       = cppcolorlog::LogEntry;
 using SinkHandle     = cppcolorlog::SinkHandle;
 using LogSink        = cppcolorlog::LogSink;
@@ -1202,6 +1308,15 @@ inline std::string demangle(const char *name) {
 #define LOGGER_LOG(level, message)                                                                                     \
   ::cppcolorlog::defaultLogger().log(                                                                                  \
       level, message, ::cppcolorlog::detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__))
+
+/**
+ * Logs a message with key/value fields and automatic source context.
+ * The variadic parameter allows a braced field list to contain commas.
+ * Example: LOGGER_LOG_FIELDS(LogLevel::INFO, "Done", {{"status", "200"}});
+ */
+#define LOGGER_LOG_FIELDS(level, message, ...)                                                                         \
+  ::cppcolorlog::defaultLogger().log(                                                                                  \
+      level, message, __VA_ARGS__, ::cppcolorlog::detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__))
 
 /**
  * Logs with a name chosen by the caller. Prefer this for meaningful lambda

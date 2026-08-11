@@ -23,6 +23,10 @@ void refreshCache() {
   LOGGER_LOG(LogLevel::INFO, "Cache refreshed");
 }
 
+void logCompletedRequestWithFields() {
+  LOGGER_LOG_FIELDS(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+}
+
 class Service {
 public:
   void start() {
@@ -101,12 +105,22 @@ public:
     level     = entry.level;
     color     = entry.color;
     colorMode = entry.colorMode;
+    timestamp = entry.timestamp;
+    message   = entry.message;
+    function  = entry.function;
+    className = entry.className;
+    fields    = entry.fields;
     text      = entry.text;
   }
 
   LogLevel    level = LogLevel::ALWAYS;
   std::string color;
   ColorMode   colorMode = ColorMode::AUTOMATIC;
+  std::string timestamp;
+  std::string message;
+  std::string function;
+  std::string className;
+  LogFields   fields;
   std::string text;
 };
 
@@ -615,7 +629,78 @@ TEST(LoggerDesignTest, StructuredSinkReceivesLevelAndColor) {
 
   EXPECT_EQ(sink->level, LogLevel::WARN);
   EXPECT_EQ(sink->color, Color::BLUE);
+  EXPECT_EQ(sink->message, "Structured message");
+  EXPECT_EQ(sink->function, "structuredSinkTest");
+  EXPECT_TRUE(sink->className.empty());
+  EXPECT_TRUE(sink->fields.empty());
+  EXPECT_TRUE(std::regex_match(sink->timestamp, std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}")));
   EXPECT_NE(sink->text.find("Structured message"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, StructuredSinkReceivesFieldsWithoutParsingText) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+  const LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
+
+  logger.log(LogLevel::INFO, "Request completed", fields, "finish", "RequestHandler");
+
+  ASSERT_EQ(sink->fields.size(), 2U);
+  EXPECT_EQ(sink->fields[0].first, "status");
+  EXPECT_EQ(sink->fields[0].second, "200");
+  EXPECT_EQ(sink->fields[1].first, "duration_ms");
+  EXPECT_EQ(sink->fields[1].second, "14");
+  EXPECT_EQ(sink->message, "Request completed");
+  EXPECT_EQ(sink->function, "finish");
+  EXPECT_EQ(sink->className, "RequestHandler");
+  EXPECT_NE(sink->text.find("Request completed [status=200, duration_ms=14]"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, DirectLogCallAcceptsBracedFields) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+
+  logger.log(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+
+  ASSERT_EQ(sink->fields.size(), 2U);
+  EXPECT_EQ(sink->fields[0], std::make_pair(std::string("status"), std::string("200")));
+  EXPECT_EQ(sink->fields[1], std::make_pair(std::string("duration_ms"), std::string("14")));
+}
+
+TEST_F(LoggerTest, FieldsMacroPreservesAutomaticSourceContextAndReadableOutput) {
+  LOGGER.setColorEnabled(false);
+
+  logCompletedRequestWithFields();
+
+  const std::string output = capturedCout.str();
+  EXPECT_NE(output.find("[logCompletedRequestWithFields] Request completed [status=200, duration_ms=14]"),
+            std::string::npos);
+}
+
+TEST(JsonSerializationTest, EscapesQuotesBackslashesAndControlCharacters) {
+  const std::string input = "\"\\\b\f\n\r\t\x01";
+
+  EXPECT_EQ(cppcolorlog::detail::escapeJsonString(input), "\\\"\\\\\\b\\f\\n\\r\\t\\u0001");
+}
+
+TEST(JsonSerializationTest, SerializesRawEntryValuesAndFields) {
+  const LogFields fields = {{"status", "200"}, {"path", "C:\\temp"}};
+  const LogEntry  entry  = {LogLevel::INFO,
+                            "human-readable text",
+                            Color::GREEN,
+                            ColorMode::DISABLED,
+                            "2026-09-05 14:30:12",
+                            "Request \"completed\"\n",
+                            "finish",
+                            "RequestHandler",
+                            fields};
+
+  const std::string json = cppcolorlog::detail::serializeLogEntryToJson(entry);
+
+  EXPECT_EQ(json, "{\"timestamp\":\"2026-09-05 14:30:12\",\"level\":\"INFO\","
+                  "\"context\":\"RequestHandler::finish\",\"message\":\"Request \\\"completed\\\"\\n\","
+                  "\"fields\":{\"status\":\"200\",\"path\":\"C:\\\\temp\"}}");
 }
 
 TEST(LoggerDesignTest, ScopedSettingsRestoreColorMode) {
