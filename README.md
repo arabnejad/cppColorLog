@@ -14,6 +14,7 @@ multiple sinks, temporary settings, and thread-safe configuration and output.
 - Console, file, in-memory, and user-defined sinks
 - Threshold and whitelist filtering
 - Fast enabled-level checks for guarding expensive messages
+- Structured key/value fields and customizable text formatting
 - Exception-safe scoped settings, plus compatible push/pop methods
 - Unified automatic function and class context on GCC, Clang, and MSVC
 - Portable time formatting and guarded GNU demangling
@@ -409,6 +410,80 @@ A sink that overrides `write(const LogEntry&)` receives these values separately:
 The project does not include a JSON sink yet. JSON string escaping and entry
 serialization are implemented and tested internally so a future JSON sink will
 not need to parse `text`.
+
+## Custom log formatting
+
+A formatter controls how a `LogEntry` becomes readable text. A sink controls
+where that text is written. This separation lets the same formatter work with
+the existing console, file, and memory sinks.
+
+The built-in `DefaultLogFormatter` keeps the standard output unchanged:
+
+```text
+[2026-09-05 14:30:12] [INFO] [handleRequest] Request completed [status=200]
+```
+
+The smallest custom formatter only needs to override `format()`:
+
+```cpp
+class SimpleLogFormatter : public LogFormatter {
+public:
+  std::string format(const LogEntry &entry) const override {
+    return std::string(toString(entry.level)) + ": " + entry.message;
+  }
+};
+```
+
+Install it without changing or replacing any sinks:
+
+```cpp
+LOGGER.setFormatter(std::make_shared<SimpleLogFormatter>());
+LOGGER_LOG(LogLevel::INFO, "Request completed");
+```
+
+Example output:
+
+```text
+INFO: Request completed
+```
+
+`format()` receives the raw level, message, source context, and fields, so it can
+choose which values to include and how to display them.
+
+Changing only the timestamp is also straightforward. Inherit from the default
+formatter to keep the standard line layout, then override `formatTimestamp()`:
+
+```cpp
+class TimeOnlyLogFormatter : public DefaultLogFormatter {
+public:
+  std::string formatTimestamp(std::time_t entryTime) const override {
+    return formatTimeWithPattern(entryTime, "%H:%M:%S");
+  }
+};
+```
+
+`formatTimeWithPattern()` accepts the same placeholders as `std::strftime`.
+For example, `%H:%M:%S` produces a timestamp such as `14:30:12`.
+
+A formatter should return plain text. Destination-specific behavior remains in
+the sinks; for example, `ConsoleSink` adds color after formatting, while
+`FileSink` writes the same text without ANSI color codes.
+
+Return to the standard layout with:
+
+```cpp
+LOGGER.useDefaultFormatter();
+```
+
+The complete runnable
+[`examples/18_custom_formatter/18_custom_formatter.cpp`](examples/18_custom_formatter/18_custom_formatter.cpp)
+demonstrates custom timestamp, level, source context, and field rendering.
+
+Formatter changes follow the same thread-local `ScopedSettings` behavior as the
+other logger settings. A settings mutex protects formatter replacement, and each
+log call keeps its selected formatter alive until that message finishes. Calls
+to the formatter and sinks are serialized. A formatter can therefore be changed
+while other threads are logging through the same `Logger`.
 
 ## Filtering selected levels
 

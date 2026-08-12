@@ -124,6 +124,47 @@ public:
   std::string text;
 };
 
+class CompactLogFormatter : public LogFormatter {
+public:
+  std::string formatTimestamp(std::time_t entryTime) const override {
+    return formatTimeWithPattern(entryTime, "%H:%M:%S");
+  }
+
+  std::string format(const LogEntry &entry) const override {
+    std::ostringstream output;
+    output << entry.timestamp << ' ' << (entry.level == LogLevel::INFO ? "I" : toString(entry.level)) << ' '
+           << entry.function << " | " << entry.message;
+
+    if (!entry.fields.empty()) {
+      output << " {";
+      for (LogFields::const_iterator field = entry.fields.begin(); field != entry.fields.end(); ++field) {
+        if (field != entry.fields.begin())
+          output << ' ';
+        output << field->first << ':' << field->second;
+      }
+      output << '}';
+    }
+    return output.str();
+  }
+};
+
+class CountingLogFormatter : public LogFormatter {
+public:
+  CountingLogFormatter() : m_formatCount(0) {}
+
+  std::string format(const LogEntry &entry) const override {
+    ++m_formatCount;
+    return entry.message;
+  }
+
+  int getFormatCount() const {
+    return m_formatCount;
+  }
+
+private:
+  mutable int m_formatCount;
+};
+
 class ReentrantSink : public LogSink {
 public:
   explicit ReentrantSink(Logger &logger) : m_logger(logger) {}
@@ -686,21 +727,114 @@ TEST(JsonSerializationTest, EscapesQuotesBackslashesAndControlCharacters) {
 
 TEST(JsonSerializationTest, SerializesRawEntryValuesAndFields) {
   const LogFields fields = {{"status", "200"}, {"path", "C:\\temp"}};
-  const LogEntry  entry  = {LogLevel::INFO,
-                            "human-readable text",
-                            Color::GREEN,
-                            ColorMode::DISABLED,
-                            "2026-09-05 14:30:12",
-                            "Request \"completed\"\n",
-                            "finish",
-                            "RequestHandler",
-                            fields};
+  LogEntry        entry  = {};
+  entry.level            = LogLevel::INFO;
+  entry.text             = "human-readable text";
+  entry.color            = Color::GREEN;
+  entry.colorMode        = ColorMode::DISABLED;
+  entry.timestamp        = "2026-09-05 14:30:12";
+  entry.message          = "Request \"completed\"\n";
+  entry.function         = "finish";
+  entry.className        = "RequestHandler";
+  entry.fields           = fields;
 
   const std::string json = cppcolorlog::detail::serializeLogEntryToJson(entry);
 
   EXPECT_EQ(json, "{\"timestamp\":\"2026-09-05 14:30:12\",\"level\":\"INFO\","
                   "\"context\":\"RequestHandler::finish\",\"message\":\"Request \\\"completed\\\"\\n\","
                   "\"fields\":{\"status\":\"200\",\"path\":\"C:\\\\temp\"}}");
+}
+
+TEST(LoggerDesignTest, CustomFormatterWorksWithExistingSinks) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+  logger.setFormatter(std::make_shared<CompactLogFormatter>());
+
+  logger.log(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}}, "finish",
+             "RequestHandler");
+  logger.useDefaultFormatter();
+  logger.log(LogLevel::INFO, "Default restored", "finish", "RequestHandler");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 2U);
+  EXPECT_TRUE(std::regex_match(logs[0], std::regex("[0-9]{2}:[0-9]{2}:[0-9]{2} I finish \\| "
+                                                   "Request completed \\{status:200 duration_ms:14\\}")));
+  EXPECT_TRUE(std::regex_match(logs[1], std::regex("\\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\] "
+                                                   "\\[INFO\\] \\[RequestHandler::finish\\] Default restored")));
+}
+
+TEST(LoggerDesignTest, ScopedSettingsRestoreFormatter) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
+
+  {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.setFormatter(std::make_shared<CompactLogFormatter>());
+    logger.log(LogLevel::INFO, "Compact", "formatTest");
+  }
+
+  logger.log(LogLevel::INFO, "Default", "formatTest");
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), 2U);
+  EXPECT_TRUE(std::regex_match(logs[0], std::regex("[0-9]{2}:[0-9]{2}:[0-9]{2} I formatTest \\| Compact")));
+  EXPECT_NE(logs[1].find("] [INFO] [formatTest] Default"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, FormatterUseIsSerializedAcrossThreads) {
+  Logger                                      logger(false);
+  const std::shared_ptr<InMemorySink>         sink              = logger.enableInMemorySink();
+  const std::shared_ptr<CountingLogFormatter> countingFormatter = std::make_shared<CountingLogFormatter>();
+  logger.setFormatter(countingFormatter);
+
+  const int                threadCount       = 4;
+  const int                messagesPerThread = 50;
+  std::vector<std::thread> threads;
+  for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex) {
+    threads.push_back(std::thread([&logger] {
+      for (int messageIndex = 0; messageIndex < messagesPerThread; ++messageIndex)
+        logger.log(LogLevel::INFO, "message");
+    }));
+  }
+
+  for (std::vector<std::thread>::iterator currentThread = threads.begin(); currentThread != threads.end();
+       ++currentThread)
+    currentThread->join();
+
+  EXPECT_EQ(countingFormatter->getFormatCount(), threadCount * messagesPerThread);
+  EXPECT_EQ(sink->getLogs().size(), static_cast<std::size_t>(threadCount * messagesPerThread));
+}
+
+TEST(LoggerDesignTest, FormatterCanBeReplacedWhileAnotherThreadLogs) {
+  Logger                              logger(false);
+  const std::shared_ptr<InMemorySink> sink             = logger.enableInMemorySink();
+  const std::shared_ptr<LogFormatter> compactFormatter = std::make_shared<CompactLogFormatter>();
+  const std::shared_ptr<LogFormatter> defaultFormatter = std::make_shared<DefaultLogFormatter>();
+  std::atomic<bool>                   loggingStarted(false);
+  const int                           messageCount = 200;
+  logger.setFormatter(compactFormatter);
+
+  std::thread loggingThread([&logger, &loggingStarted] {
+    loggingStarted.store(true);
+    for (int messageIndex = 0; messageIndex < messageCount; ++messageIndex)
+      logger.log(LogLevel::INFO, "Concurrent message", "writer");
+  });
+
+  while (!loggingStarted.load())
+    std::this_thread::yield();
+  for (int replacementIndex = 0; replacementIndex < messageCount; ++replacementIndex)
+    logger.setFormatter(replacementIndex % 2 == 0 ? compactFormatter : defaultFormatter);
+
+  loggingThread.join();
+
+  const std::vector<std::string> logs = sink->getLogs();
+  ASSERT_EQ(logs.size(), static_cast<std::size_t>(messageCount));
+  for (std::vector<std::string>::const_iterator log = logs.begin(); log != logs.end(); ++log) {
+    const bool usedCompact = std::regex_match(*log, std::regex("[0-9]{2}:[0-9]{2}:[0-9]{2} I writer \\| "
+                                                               "Concurrent message"));
+    const bool usedDefault = log->find("] [INFO] [writer] Concurrent message") != std::string::npos;
+    EXPECT_TRUE(usedCompact || usedDefault);
+  }
 }
 
 TEST(LoggerDesignTest, ScopedSettingsRestoreColorMode) {

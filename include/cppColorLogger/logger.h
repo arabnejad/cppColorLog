@@ -3,7 +3,6 @@
 
 #include <array>
 #include <cctype>
-#include <chrono>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -678,6 +677,63 @@ inline std::string serializeLogEntryToJson(const LogEntry &entry) {
 
 } // namespace detail
 
+/**
+ * Converts a LogEntry into the text written by ordinary sinks.
+ *
+ * Override format() to control the line layout. Override formatTimestamp() only
+ * when the timestamp needs a different format. Return plain text because sinks
+ * handle destination-specific behavior such as console color.
+ */
+class LogFormatter {
+public:
+  virtual ~LogFormatter() {}
+
+  /** Creates the complete human-readable line stored in LogEntry::text. */
+  virtual std::string format(const LogEntry &entry) const = 0;
+
+  /** Creates LogEntry::timestamp before format() receives the entry. */
+  virtual std::string formatTimestamp(std::time_t entryTime) const {
+    return formatTimeWithPattern(entryTime, "%Y-%m-%d %H:%M:%S");
+  }
+
+protected:
+  /** Formats a time using the same placeholders accepted by std::strftime. */
+  static std::string formatTimeWithPattern(std::time_t entryTime, const std::string &pattern) {
+    std::tm timeInfo = {};
+#if defined(_WIN32)
+    localtime_s(&timeInfo, &entryTime);
+#else
+    localtime_r(&entryTime, &timeInfo);
+#endif
+
+    char timestamp[128] = {};
+    if (std::strftime(timestamp, sizeof(timestamp), pattern.c_str(), &timeInfo) == 0)
+      return std::string();
+    return timestamp;
+  }
+};
+
+/** Preserves the logger's standard human-readable output format. */
+class DefaultLogFormatter : public LogFormatter {
+public:
+  std::string format(const LogEntry &entry) const override {
+    std::ostringstream output;
+    output << '[' << entry.timestamp << "] [" << toString(entry.level) << "] ["
+           << detail::contextName(entry.function, entry.className) << "] " << entry.message;
+
+    if (!entry.fields.empty()) {
+      output << " [";
+      for (LogFields::const_iterator field = entry.fields.begin(); field != entry.fields.end(); ++field) {
+        if (field != entry.fields.begin())
+          output << ", ";
+        output << field->first << '=' << field->second;
+      }
+      output << ']';
+    }
+    return output.str();
+  }
+};
+
 class Logger;
 
 /**
@@ -735,8 +791,12 @@ public:
   }
 
   void write(const std::string &message) override {
-    const LogEntry entry = {LogLevel::ALWAYS, message, Color::WHITE, ColorMode::AUTOMATIC, "",
-                            message,          "",      "",           LogFields()};
+    LogEntry entry  = {};
+    entry.level     = LogLevel::ALWAYS;
+    entry.text      = message;
+    entry.color     = Color::WHITE;
+    entry.colorMode = ColorMode::AUTOMATIC;
+    entry.message   = message;
     write(entry);
   }
 
@@ -848,7 +908,7 @@ struct LoggerState {
   LoggerState()
       : logLevel(LogLevel::INFO),
         colors{{Color::WHITE, Color::MAGENTA, Color::RED, Color::YELLOW, Color::GREEN, Color::CYAN, Color::BLUE}},
-        colorMode(ColorMode::AUTOMATIC) {}
+        colorMode(ColorMode::AUTOMATIC), formatter(std::make_shared<DefaultLogFormatter>()) {}
 
   LogLevel                                        logLevel;
   std::set<LogLevel>                              filterLevels;
@@ -856,6 +916,7 @@ struct LoggerState {
   ColorMode                                       colorMode;
   std::map<std::size_t, std::shared_ptr<LogSink>> sinks;
   std::shared_ptr<InMemorySink>                   inMemorySink;
+  std::shared_ptr<LogFormatter>                   formatter;
 };
 
 class ScopedSettings;
@@ -867,6 +928,7 @@ class Logger {
     std::string                           color;
     ColorMode                             colorMode;
     std::vector<std::shared_ptr<LogSink>> sinks;
+    std::shared_ptr<LogFormatter>         formatter;
   };
 
 public:
@@ -908,6 +970,23 @@ public:
   void useAutomaticColor() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).colorMode = ColorMode::AUTOMATIC;
+  }
+
+  /**
+   * Uses a custom formatter for the calling thread's active settings.
+   *
+   * A null pointer is ignored, so logging always has a valid formatter.
+   */
+  void setFormatter(const std::shared_ptr<LogFormatter> &newFormatter) {
+    if (!newFormatter)
+      return;
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
+    activeStateLocked(std::this_thread::get_id()).formatter = newFormatter;
+  }
+
+  /** Restores the standard timestamp and line layout. */
+  void useDefaultFormatter() {
+    setFormatter(std::make_shared<DefaultLogFormatter>());
   }
 
   /**
@@ -1091,13 +1170,13 @@ private:
     // Avoid converting a rejected value to text. Expressions passed as
     // `message` have already been evaluated by the caller; use isEnabled()
     // before the call when creating the value itself is expensive.
-    OutputSettings output;
-    if (!captureOutputSettings(level, output))
+    OutputSettings outputSettings;
+    if (!tryCaptureOutputSettings(level, outputSettings))
       return;
 
     std::ostringstream stream;
     stream << message;
-    writeToSinks(level, stream.str(), fields, function, className, output);
+    formatAndWriteToSinks(level, stream.str(), fields, function, className, outputSettings);
   }
 
   SinkHandle addSinkLocked(LoggerState &state, const std::shared_ptr<LogSink> &sink) {
@@ -1124,43 +1203,6 @@ private:
 
   static std::size_t levelIndex(LogLevel level) {
     return static_cast<std::size_t>(level);
-  }
-
-  static std::tm localTime(std::time_t time) {
-    std::tm result = {};
-#if defined(_WIN32)
-    localtime_s(&result, &time);
-#else
-    localtime_r(&time, &result);
-#endif
-    return result;
-  }
-
-  static std::string currentTimestamp() {
-    const std::chrono::system_clock::time_point now      = std::chrono::system_clock::now();
-    const std::time_t                           time     = std::chrono::system_clock::to_time_t(now);
-    const std::tm                               timeInfo = localTime(time);
-
-    char timestamp[32] = {};
-    std::strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &timeInfo);
-    return timestamp;
-  }
-
-  static std::string formatLog(const LogEntry &entry) {
-    std::ostringstream stream;
-    stream << '[' << entry.timestamp << "] [" << toString(entry.level) << "] ["
-           << detail::contextName(entry.function, entry.className) << "] " << entry.message;
-
-    if (!entry.fields.empty()) {
-      stream << " [";
-      for (LogFields::const_iterator field = entry.fields.begin(); field != entry.fields.end(); ++field) {
-        if (field != entry.fields.begin())
-          stream << ", ";
-        stream << field->first << '=' << field->second;
-      }
-      stream << ']';
-    }
-    return stream.str();
   }
 
   // The caller must hold m_state_mux. Setters and logging use the current
@@ -1191,31 +1233,41 @@ private:
       m_scopedStateStacks.erase(stack);
   }
 
-  // Check the level and copy the selected color and sinks while holding the
-  // state lock. Message formatting and output happen after releasing the lock.
-  bool captureOutputSettings(LogLevel level, OutputSettings &output) const {
+  // Check the level and copy the selected color, formatter, and sinks while
+  // holding the state lock. Formatting and output happen after releasing it.
+  bool tryCaptureOutputSettings(LogLevel level, OutputSettings &outputSettings) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
     if (!acceptsLevel(state, level))
       return false;
 
-    const std::size_t index = levelIndex(level);
-    output.color            = index < state.colors.size() ? state.colors[index] : Color::WHITE;
-    output.colorMode        = state.colorMode;
-    copySinksLocked(state, output.sinks);
+    const std::size_t index  = levelIndex(level);
+    outputSettings.color     = index < state.colors.size() ? state.colors[index] : Color::WHITE;
+    outputSettings.colorMode = state.colorMode;
+    outputSettings.formatter = state.formatter;
+    copySinksLocked(state, outputSettings.sinks);
     return true;
   }
 
-  void writeToSinks(LogLevel level, const std::string &message, const LogFields &fields, const std::string &function,
-                    const std::string &className, const OutputSettings &output) {
-    LogEntry entry = {level,    "",        output.color, output.colorMode, currentTimestamp(), message,
-                      function, className, fields};
-    entry.text     = formatLog(entry);
+  void formatAndWriteToSinks(LogLevel level, const std::string &message, const LogFields &fields,
+                             const std::string &function, const std::string &className,
+                             const OutputSettings &outputSettings) {
+    LogEntry entry  = {};
+    entry.level     = level;
+    entry.color     = outputSettings.color;
+    entry.colorMode = outputSettings.colorMode;
+    entry.message   = message;
+    entry.function  = function;
+    entry.className = className;
+    entry.fields    = fields;
 
-    // Keep complete entries ordered without holding the configuration lock during I/O.
+    // Formatting and sink writes are serialized. This lets a formatter safely
+    // keep internal state when it is used by this Logger.
     std::lock_guard<std::recursive_mutex> output_lck(m_output_mux);
-    for (std::vector<std::shared_ptr<LogSink>>::const_iterator sink = output.sinks.begin(); sink != output.sinks.end();
-         ++sink)
+    entry.timestamp = outputSettings.formatter->formatTimestamp(std::time(nullptr));
+    entry.text      = outputSettings.formatter->format(entry);
+    for (std::vector<std::shared_ptr<LogSink>>::const_iterator sink = outputSettings.sinks.begin();
+         sink != outputSettings.sinks.end(); ++sink)
       (*sink)->write(entry);
   }
 
@@ -1268,21 +1320,23 @@ inline Logger &defaultLogger() {
 } // namespace cppcolorlog
 
 // Compatibility aliases preserve the original public API.
-using LogLevel       = cppcolorlog::LogLevel;
-using LOGLEVELL      = cppcolorlog::LogLevel;
-using ColorMode      = cppcolorlog::ColorMode;
-using FileOpenMode   = cppcolorlog::FileOpenMode;
-using LogFields      = cppcolorlog::LogFields;
-using LogEntry       = cppcolorlog::LogEntry;
-using SinkHandle     = cppcolorlog::SinkHandle;
-using LogSink        = cppcolorlog::LogSink;
-using ConsoleSink    = cppcolorlog::ConsoleSink;
-using FileSink       = cppcolorlog::FileSink;
-using InMemorySink   = cppcolorlog::InMemorySink;
-using LoggerState    = cppcolorlog::LoggerState;
-using Logger         = cppcolorlog::Logger;
-using LoggerSettings = cppcolorlog::Logger;
-using ScopedSettings = cppcolorlog::ScopedSettings;
+using LogLevel            = cppcolorlog::LogLevel;
+using LOGLEVELL           = cppcolorlog::LogLevel;
+using ColorMode           = cppcolorlog::ColorMode;
+using FileOpenMode        = cppcolorlog::FileOpenMode;
+using LogFields           = cppcolorlog::LogFields;
+using LogEntry            = cppcolorlog::LogEntry;
+using LogFormatter        = cppcolorlog::LogFormatter;
+using DefaultLogFormatter = cppcolorlog::DefaultLogFormatter;
+using SinkHandle          = cppcolorlog::SinkHandle;
+using LogSink             = cppcolorlog::LogSink;
+using ConsoleSink         = cppcolorlog::ConsoleSink;
+using FileSink            = cppcolorlog::FileSink;
+using InMemorySink        = cppcolorlog::InMemorySink;
+using LoggerState         = cppcolorlog::LoggerState;
+using Logger              = cppcolorlog::Logger;
+using LoggerSettings      = cppcolorlog::Logger;
+using ScopedSettings      = cppcolorlog::ScopedSettings;
 
 inline std::string demangle(const char *name) {
   return cppcolorlog::demangle(name);
