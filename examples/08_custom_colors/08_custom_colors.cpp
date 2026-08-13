@@ -3,11 +3,11 @@
 
 int main() {
   printf("Example 08: Set custom terminal colors for specific log levels.\n");
-  LOGGER.setLevelColor(LogLevel::INFO, Color::CYAN);
-  LOGGER.setLevelColor(LogLevel::ERROR, Color::MAGENTA);
+  LOGGER.setLevelColor(LOGLEVEL::INFO, Color::CYAN);
+  LOGGER.setLevelColor(LOGLEVEL::ERROR, Color::MAGENTA);
 
-  LOGGER.setLogLevel(LogLevel::INFO);
-  LOGGER_LOG(LogLevel::INFO, "Info message in cyan");
-  LOGGER_LOG(LogLevel::ERROR, "Error message in magenta");
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER_LOG(LOGLEVEL::INFO, "Info message in cyan");
+  LOGGER_LOG(LOGLEVEL::ERROR, "Error message in magenta");
   return 0;
 }

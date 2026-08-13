@@ -20,17 +20,17 @@ int multiTranslationUnitB();
 // Keeping them outside the anonymous namespace makes the expected context
 // exactly `refreshCache` and `Service::start` on supported compilers.
 void refreshCache() {
-  LOGGER_LOG(LogLevel::INFO, "Cache refreshed");
+  LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed");
 }
 
 void logCompletedRequestWithFields() {
-  LOGGER_LOG_FIELDS(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+  LOGGER_LOG_FIELDS(LOGLEVEL::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
 }
 
 class Service {
 public:
   void start() {
-    LOGGER_LOG(LogLevel::INFO, "Service started");
+    LOGGER_LOG(LOGLEVEL::INFO, "Service started");
   }
 };
 
@@ -38,21 +38,22 @@ namespace {
 
 class LoggerTest : public ::testing::Test {
 protected:
-  const std::string logFile = "test_log_output.txt";
-  std::stringstream capturedCout;
-  std::streambuf   *oldCout = nullptr;
+  const std::string               logFile = "test_log_output.txt";
+  std::stringstream               capturedCout;
+  std::streambuf                 *oldCout = nullptr;
+  std::unique_ptr<ScopedSettings> m_testSettings;
 
   void SetUp() override {
     std::remove(logFile.c_str());
-    LOGGER.pushLogSetting();
-    LOGGER.setLogLevel(LogLevel::INFO);
+    m_testSettings.reset(new ScopedSettings(LOGGER));
+    LOGGER.setLogLevel(LOGLEVEL::INFO);
     LOGGER.clearFilterLevels();
     oldCout = std::cout.rdbuf(capturedCout.rdbuf());
   }
 
   void TearDown() override {
     std::cout.rdbuf(oldCout);
-    LOGGER.popLogSetting();
+    m_testSettings.reset();
     std::remove(logFile.c_str());
   }
 
@@ -66,8 +67,8 @@ protected:
 
 class RecordingSink : public LogSink {
 public:
-  void write(const std::string &message) override {
-    messages.push_back(message);
+  void write(const LogEntry &entry) override {
+    messages.push_back(entry.text);
   }
 
   std::vector<std::string> messages;
@@ -84,7 +85,7 @@ class BlockingSink : public LogSink {
 public:
   explicit BlockingSink(const std::shared_ptr<BlockingSinkState> &state) : m_state(state) {}
 
-  void write(const std::string &) override {
+  void write(const LogEntry &) override {
     std::unique_lock<std::mutex> write_lck(m_state->write_mux);
     m_state->writeStarted = true;
     m_state->write_cv.notify_all();
@@ -97,10 +98,6 @@ private:
 
 class StructuredSink : public LogSink {
 public:
-  void write(const std::string &message) override {
-    text = message;
-  }
-
   void write(const LogEntry &entry) override {
     level     = entry.level;
     color     = entry.color;
@@ -113,7 +110,7 @@ public:
     text      = entry.text;
   }
 
-  LogLevel    level = LogLevel::ALWAYS;
+  LOGLEVEL    level = LOGLEVEL::ALWAYS;
   std::string color;
   ColorMode   colorMode = ColorMode::AUTOMATIC;
   std::string timestamp;
@@ -132,7 +129,7 @@ public:
 
   std::string format(const LogEntry &entry) const override {
     std::ostringstream output;
-    output << entry.timestamp << ' ' << (entry.level == LogLevel::INFO ? "I" : toString(entry.level)) << ' '
+    output << entry.timestamp << ' ' << (entry.level == LOGLEVEL::INFO ? "I" : toString(entry.level)) << ' '
            << entry.function << " | " << entry.message;
 
     if (!entry.fields.empty()) {
@@ -169,10 +166,10 @@ class ReentrantSink : public LogSink {
 public:
   explicit ReentrantSink(Logger &logger) : m_logger(logger) {}
 
-  void write(const std::string &) override {
+  void write(const LogEntry &) override {
     ++messageCount;
     if (messageCount == 1)
-      m_logger.log(LogLevel::INFO, "Nested message", "ReentrantSink");
+      m_logger.log(LOGLEVEL::INFO, "Nested message", "ReentrantSink");
   }
 
   int messageCount = 0;
@@ -197,52 +194,58 @@ std::string buildCountedMessage(int &buildCount) {
   return "expensive debug message";
 }
 
+LogEntry makeFormattedEntry(const std::string &text) {
+  LogEntry entry = {};
+  entry.text     = text;
+  return entry;
+}
+
 class ContextExample {
 public:
   void emit() {
-    LOGGER_C(LogLevel::INFO, "Class context");
+    LOGGER_LOG(LOGLEVEL::INFO, "Class context");
   }
 };
 
 void logFromAutomaticFreeFunction() {
-  LOGGER_LOG(LogLevel::INFO, "Automatic free function");
+  LOGGER_LOG(LOGLEVEL::INFO, "Automatic free function");
 }
 
 template <typename T> void logFromAutomaticFunctionTemplate(const T &value) {
-  LOGGER_LOG(LogLevel::INFO, value);
+  LOGGER_LOG(LOGLEVEL::INFO, value);
 }
 
 class AutomaticContextExample {
 public:
   AutomaticContextExample() {
-    LOGGER_LOG(LogLevel::INFO, "Automatic constructor");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic constructor");
   }
 
   ~AutomaticContextExample() {
-    LOGGER_LOG(LogLevel::INFO, "Automatic destructor");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic destructor");
   }
 
   void member() {
-    LOGGER_LOG(LogLevel::INFO, "Automatic member");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic member");
   }
 
   static void staticMember() {
-    LOGGER_LOG(LogLevel::INFO, "Automatic static member");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic static member");
   }
 
   template <typename T> void write(const T &value) {
-    LOGGER_LOG(LogLevel::INFO, value);
+    LOGGER_LOG(LOGLEVEL::INFO, value);
   }
 
   void operator()() {
-    LOGGER_LOG(LogLevel::INFO, "Automatic operator");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic operator");
   }
 };
 
 template <typename T> class AutomaticRepository {
 public:
   void save(const T &) {
-    LOGGER_LOG(LogLevel::INFO, "Automatic class template");
+    LOGGER_LOG(LOGLEVEL::INFO, "Automatic class template");
   }
 };
 
@@ -251,7 +254,7 @@ TEST_F(LoggerTest, LogsToFileWithoutColor) {
   ASSERT_TRUE(sink->isOpen());
   LOGGER.setColorEnabled(true);
 
-  LOGGER_F(LogLevel::INFO, "File log test");
+  LOGGER_LOG(LOGLEVEL::INFO, "File log test");
 
   const std::string content = readFile();
   EXPECT_NE(content.find("File log test"), std::string::npos);
@@ -266,7 +269,7 @@ TEST_F(LoggerTest, FileSinkAppendModePreservesExistingContent) {
 
   FileSink sink(logFile, FileOpenMode::APPEND);
   ASSERT_TRUE(sink.isOpen());
-  sink.write("Appended content");
+  sink.write(makeFormattedEntry("Appended content"));
   ASSERT_TRUE(sink.flush());
 
   const std::string content = readFile();
@@ -283,7 +286,7 @@ TEST_F(LoggerTest, FileSinkTruncateModeClearsExistingContent) {
 
   FileSink sink(logFile, FileOpenMode::TRUNCATE);
   ASSERT_TRUE(sink.isOpen());
-  sink.write("Replacement content");
+  sink.write(makeFormattedEntry("Replacement content"));
   ASSERT_TRUE(sink.flush());
 
   const std::string content = readFile();
@@ -296,7 +299,7 @@ TEST_F(LoggerTest, LoggerFlushWritesAllActiveFileSinks) {
   const std::shared_ptr<FileSink> sink = logger.addFileSink(logFile, FileOpenMode::TRUNCATE);
   ASSERT_TRUE(sink->isOpen());
 
-  logger.log(LogLevel::INFO, "Flushed through logger", "flushTest");
+  logger.log(LOGLEVEL::INFO, "Flushed through logger", "flushTest");
 
   EXPECT_TRUE(logger.flush());
   EXPECT_FALSE(sink->hasError());
@@ -313,7 +316,7 @@ TEST_F(LoggerTest, FileSinkReportsOpenFailureAndKeepsFirstError) {
   EXPECT_NE(openError.find("Failed to open"), std::string::npos);
   EXPECT_NE(openError.find(invalidPath), std::string::npos);
 
-  sink.write("Ignored after open failure");
+  sink.write(makeFormattedEntry("Ignored after open failure"));
   EXPECT_FALSE(sink.flush());
   EXPECT_EQ(sink.getLastError(), openError);
 }
@@ -324,7 +327,7 @@ TEST(FileSinkFailureTest, ReportsFailureWhenFileStopsAcceptingWrites) {
   const std::shared_ptr<FileSink> sink = logger.addFileSink("/dev/full");
   ASSERT_TRUE(sink->isOpen());
 
-  logger.log(LogLevel::INFO, "This write cannot complete", "failureTest");
+  logger.log(LOGLEVEL::INFO, "This write cannot complete", "failureTest");
 
   EXPECT_TRUE(sink->hasError());
   EXPECT_NE(sink->getLastError().find("Failed to write"), std::string::npos);
@@ -334,10 +337,10 @@ TEST(FileSinkFailureTest, ReportsFailureWhenFileStopsAcceptingWrites) {
 
 TEST_F(LoggerTest, LogLevelThresholdWorks) {
   LOGGER.addFileSink(logFile);
-  LOGGER.setLogLevel(LogLevel::ERROR);
+  LOGGER.setLogLevel(LOGLEVEL::ERROR);
 
-  LOGGER_F(LogLevel::DEBUG, "This should not appear");
-  LOGGER_F(LogLevel::ERROR, "This should appear");
+  LOGGER_LOG(LOGLEVEL::DEBUG, "This should not appear");
+  LOGGER_LOG(LOGLEVEL::ERROR, "This should appear");
 
   const std::string content = readFile();
   EXPECT_EQ(content.find("This should not appear"), std::string::npos);
@@ -346,41 +349,26 @@ TEST_F(LoggerTest, LogLevelThresholdWorks) {
 
 TEST_F(LoggerTest, FilterLevelWhitelistWorks) {
   LOGGER.addFileSink(logFile);
-  LOGGER.setLogLevel(LogLevel::DEBUG);
-  LOGGER.setFilterLevels({LogLevel::ERROR});
+  LOGGER.setLogLevel(LOGLEVEL::DEBUG);
+  LOGGER.setFilterLevels({LOGLEVEL::ERROR});
 
-  LOGGER_F(LogLevel::DEBUG, "Filtered out");
-  LOGGER_F(LogLevel::ERROR, "Filtered in");
+  LOGGER_LOG(LOGLEVEL::DEBUG, "Filtered out");
+  LOGGER_LOG(LOGLEVEL::ERROR, "Filtered in");
 
   const std::string content = readFile();
   EXPECT_EQ(content.find("Filtered out"), std::string::npos);
   EXPECT_NE(content.find("Filtered in"), std::string::npos);
 }
 
-TEST_F(LoggerTest, PushPopSettingsRestoresConfiguration) {
-  LOGGER.addFileSink(logFile);
-  LOGGER.setLogLevel(LogLevel::INFO);
-  LOGGER.pushLogSetting();
-  LOGGER.setLogLevel(LogLevel::ERROR);
-
-  LOGGER_F(LogLevel::INFO, "This should be hidden");
-  LOGGER.popLogSetting();
-  LOGGER_F(LogLevel::INFO, "This should be shown");
-
-  const std::string content = readFile();
-  EXPECT_EQ(content.find("This should be hidden"), std::string::npos);
-  EXPECT_NE(content.find("This should be shown"), std::string::npos);
-}
-
 TEST_F(LoggerTest, ScopedSettingsRestoresConfiguration) {
   LOGGER.addFileSink(logFile);
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   {
     ScopedSettings temporary = LOGGER.scopedSettings();
-    LOGGER.setLogLevel(LogLevel::ERROR);
-    LOGGER_F(LogLevel::INFO, "Hidden in scope");
+    LOGGER.setLogLevel(LOGLEVEL::ERROR);
+    LOGGER_LOG(LOGLEVEL::INFO, "Hidden in scope");
   }
-  LOGGER_F(LogLevel::INFO, "Visible after scope");
+  LOGGER_LOG(LOGLEVEL::INFO, "Visible after scope");
 
   const std::string content = readFile();
   EXPECT_EQ(content.find("Hidden in scope"), std::string::npos);
@@ -390,7 +378,7 @@ TEST_F(LoggerTest, ScopedSettingsRestoresConfiguration) {
 TEST_F(LoggerTest, InMemorySinkCapturesLog) {
   LOGGER.enableInMemorySink();
   LOGGER.setColorEnabled(true);
-  LOGGER_F(LogLevel::INFO, "Memory captured log");
+  LOGGER_LOG(LOGLEVEL::INFO, "Memory captured log");
 
   const std::vector<std::string> logs = LOGGER.getInMemoryLogs();
   ASSERT_FALSE(logs.empty());
@@ -398,13 +386,14 @@ TEST_F(LoggerTest, InMemorySinkCapturesLog) {
   EXPECT_EQ(logs.back().find("\033["), std::string::npos);
 }
 
-TEST_F(LoggerTest, InMemorySinkCanBeEnabledAgainAfterSettingsPop) {
-  LOGGER.pushLogSetting();
-  LOGGER.enableInMemorySink();
-  LOGGER.popLogSetting();
+TEST_F(LoggerTest, InMemorySinkCanBeEnabledAgainAfterScopedSettingsEnds) {
+  {
+    ScopedSettings temporary = LOGGER.scopedSettings();
+    LOGGER.enableInMemorySink();
+  }
 
   const std::shared_ptr<InMemorySink> sink = LOGGER.enableInMemorySink();
-  LOGGER_F(LogLevel::INFO, "Captured after pop");
+  LOGGER_LOG(LOGLEVEL::INFO, "Captured after pop");
 
   ASSERT_TRUE(sink);
   ASSERT_FALSE(sink->getLogs().empty());
@@ -412,10 +401,10 @@ TEST_F(LoggerTest, InMemorySinkCanBeEnabledAgainAfterSettingsPop) {
 
 TEST_F(LoggerTest, ConsoleUsesConfiguredColor) {
   std::string customColor = Color::CYAN;
-  LOGGER.setLevelColor(LogLevel::INFO, customColor);
+  LOGGER.setLevelColor(LOGLEVEL::INFO, customColor);
   LOGGER.setColorEnabled(true);
   customColor.clear();
-  LOGGER_F(LogLevel::INFO, "Custom color");
+  LOGGER_LOG(LOGLEVEL::INFO, "Custom color");
 
   const std::string output = capturedCout.str();
   EXPECT_NE(output.find(Color::CYAN), std::string::npos);
@@ -425,7 +414,7 @@ TEST_F(LoggerTest, ConsoleUsesConfiguredColor) {
 
 TEST_F(LoggerTest, ConsoleOmitsColorWhenExplicitlyDisabled) {
   LOGGER.setColorEnabled(false);
-  LOGGER_F(LogLevel::INFO, "Plain console message");
+  LOGGER_LOG(LOGLEVEL::INFO, "Plain console message");
 
   const std::string output = capturedCout.str();
   EXPECT_NE(output.find("Plain console message"), std::string::npos);
@@ -502,9 +491,9 @@ TEST_F(LoggerTest, UnifiedMacroDetectsTemplateContexts) {
 }
 
 TEST_F(LoggerTest, UnifiedMacroUsesStableLambdaLabelOrExplicitContext) {
-  const auto        automatic = [] { LOGGER_LOG(LogLevel::INFO, "Automatic lambda"); };
+  const auto        automatic = [] { LOGGER_LOG(LOGLEVEL::INFO, "Automatic lambda"); };
   const std::string context   = "RequestHandler::onResponse";
-  const auto        named     = [&context] { LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, context, "Explicit lambda"); };
+  const auto        named     = [&context] { LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, context, "Explicit lambda"); };
 
   automatic();
   named();
@@ -521,13 +510,13 @@ TEST_F(LoggerTest, DocumentationExamplesProduceTheirDisplayedContextAndMessage) 
   Service service;
   service.start();
 
-  const auto automaticLambda = []() { LOGGER_LOG(LogLevel::INFO, "Cache refreshed"); };
+  const auto automaticLambda = []() { LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed"); };
   automaticLambda();
 
-  const auto namedLambda = []() { LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "refreshCache", "Cache refreshed"); };
+  const auto namedLambda = []() { LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, "refreshCache", "Cache refreshed"); };
   namedLambda();
 
-  LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "UserRepository::save", "Saving user");
+  LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, "UserRepository::save", "Saving user");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 5U);
@@ -543,7 +532,7 @@ TEST(LoggerDesignTest, PublicCustomSinkReceivesMessages) {
   const std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
   logger.addSink(sink);
 
-  logger.log(LogLevel::INFO, 42, "customSinkTest");
+  logger.log(LOGLEVEL::INFO, 42, "customSinkTest");
 
   ASSERT_EQ(sink->messages.size(), 1U);
   EXPECT_NE(sink->messages.front().find("42"), std::string::npos);
@@ -555,17 +544,17 @@ TEST(LoggerDesignTest, RemovesOnlyTheSelectedSink) {
   const std::shared_ptr<RecordingSink> remainingSink = std::make_shared<RecordingSink>();
   const SinkHandle                     removedHandle = logger.addSink(removedSink);
   logger.addSink(remainingSink);
-  logger.setLogLevel(LogLevel::DEBUG);
+  logger.setLogLevel(LOGLEVEL::DEBUG);
 
-  logger.log(LogLevel::INFO, "Before removal", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "Before removal", "sinkTest");
   EXPECT_TRUE(logger.removeSink(removedHandle));
-  logger.log(LogLevel::DEBUG, "After removal", "sinkTest");
+  logger.log(LOGLEVEL::DEBUG, "After removal", "sinkTest");
 
   ASSERT_EQ(removedSink->messages.size(), 1U);
   EXPECT_NE(removedSink->messages[0].find("Before removal"), std::string::npos);
   ASSERT_EQ(remainingSink->messages.size(), 2U);
   EXPECT_NE(remainingSink->messages[1].find("After removal"), std::string::npos);
-  EXPECT_TRUE(logger.isEnabled(LogLevel::DEBUG));
+  EXPECT_TRUE(logger.isEnabled(LOGLEVEL::DEBUG));
 }
 
 TEST(LoggerDesignTest, RemovingUnknownOrAlreadyRemovedHandleIsHarmless) {
@@ -588,12 +577,12 @@ TEST_F(LoggerTest, DefaultConsoleSinkCanBeRemovedAndRestored) {
 
   ASSERT_TRUE(defaultConsole.isValid());
   EXPECT_TRUE(logger.removeSink(defaultConsole));
-  logger.log(LogLevel::INFO, "No console sink", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "No console sink", "sinkTest");
 
   const SinkHandle restoredConsole = logger.addConsoleSink();
   ASSERT_TRUE(restoredConsole.isValid());
   logger.setColorEnabled(false);
-  logger.log(LogLevel::INFO, "Console restored", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "Console restored", "sinkTest");
 
   const std::string output = capturedCout.str();
   EXPECT_EQ(output.find("No console sink"), std::string::npos);
@@ -603,12 +592,12 @@ TEST_F(LoggerTest, DefaultConsoleSinkCanBeRemovedAndRestored) {
 TEST(LoggerDesignTest, ClearSinksRemovesManagedMemorySinkAndAllowsItToBeEnabledAgain) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> original = logger.enableInMemorySink();
-  logger.log(LogLevel::INFO, "Before clear", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "Before clear", "sinkTest");
 
   logger.clearSinks();
-  logger.log(LogLevel::INFO, "After clear", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "After clear", "sinkTest");
   const std::shared_ptr<InMemorySink> replacement = logger.enableInMemorySink();
-  logger.log(LogLevel::INFO, "After enable", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "After enable", "sinkTest");
 
   ASSERT_EQ(original->getLogs().size(), 1U);
   EXPECT_NE(original->getLogs()[0].find("Before clear"), std::string::npos);
@@ -624,9 +613,9 @@ TEST(LoggerDesignTest, SinkRemovalInsideScopeIsRestoredWithTheScope) {
   {
     ScopedSettings settings = logger.scopedSettings();
     EXPECT_TRUE(logger.removeSink(handle));
-    logger.log(LogLevel::INFO, "Hidden in scope", "sinkTest");
+    logger.log(LOGLEVEL::INFO, "Hidden in scope", "sinkTest");
   }
-  logger.log(LogLevel::INFO, "Visible after scope", "sinkTest");
+  logger.log(LOGLEVEL::INFO, "Visible after scope", "sinkTest");
 
   ASSERT_EQ(sink->messages.size(), 1U);
   EXPECT_NE(sink->messages[0].find("Visible after scope"), std::string::npos);
@@ -639,7 +628,7 @@ TEST(LoggerDesignTest, RemovingSinkDuringWriteKeepsInProgressWriteAlive) {
   const std::weak_ptr<BlockingSink>        sinkLifetime = sink;
   const SinkHandle                         handle       = logger.addSink(sink);
 
-  std::thread loggingThread([&logger] { logger.log(LogLevel::INFO, "In progress", "sinkTest"); });
+  std::thread loggingThread([&logger] { logger.log(LOGLEVEL::INFO, "In progress", "sinkTest"); });
   {
     std::unique_lock<std::mutex> write_lck(state->write_mux);
     state->write_cv.wait(write_lck, [&state] { return state->writeStarted; });
@@ -664,11 +653,11 @@ TEST(LoggerDesignTest, StructuredSinkReceivesLevelAndColor) {
   Logger                                logger(false);
   const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
   logger.addSink(sink);
-  logger.setLevelColor(LogLevel::WARN, Color::BLUE);
+  logger.setLevelColor(LOGLEVEL::WARN, Color::BLUE);
 
-  logger.log(LogLevel::WARN, "Structured message", "structuredSinkTest");
+  logger.log(LOGLEVEL::WARN, "Structured message", "structuredSinkTest");
 
-  EXPECT_EQ(sink->level, LogLevel::WARN);
+  EXPECT_EQ(sink->level, LOGLEVEL::WARN);
   EXPECT_EQ(sink->color, Color::BLUE);
   EXPECT_EQ(sink->message, "Structured message");
   EXPECT_EQ(sink->function, "structuredSinkTest");
@@ -684,7 +673,7 @@ TEST(LoggerDesignTest, StructuredSinkReceivesFieldsWithoutParsingText) {
   logger.addSink(sink);
   const LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
 
-  logger.log(LogLevel::INFO, "Request completed", fields, "finish", "RequestHandler");
+  logger.log(LOGLEVEL::INFO, "Request completed", fields, "finish", "RequestHandler");
 
   ASSERT_EQ(sink->fields.size(), 2U);
   EXPECT_EQ(sink->fields[0].first, "status");
@@ -702,7 +691,7 @@ TEST(LoggerDesignTest, DirectLogCallAcceptsBracedFields) {
   const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
   logger.addSink(sink);
 
-  logger.log(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+  logger.log(LOGLEVEL::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
 
   ASSERT_EQ(sink->fields.size(), 2U);
   EXPECT_EQ(sink->fields[0], std::make_pair(std::string("status"), std::string("200")));
@@ -728,7 +717,7 @@ TEST(JsonSerializationTest, EscapesQuotesBackslashesAndControlCharacters) {
 TEST(JsonSerializationTest, SerializesRawEntryValuesAndFields) {
   const LogFields fields = {{"status", "200"}, {"path", "C:\\temp"}};
   LogEntry        entry  = {};
-  entry.level            = LogLevel::INFO;
+  entry.level            = LOGLEVEL::INFO;
   entry.text             = "human-readable text";
   entry.color            = Color::GREEN;
   entry.colorMode        = ColorMode::DISABLED;
@@ -750,10 +739,10 @@ TEST(LoggerDesignTest, CustomFormatterWorksWithExistingSinks) {
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
   logger.setFormatter(std::make_shared<CompactLogFormatter>());
 
-  logger.log(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}}, "finish",
+  logger.log(LOGLEVEL::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}}, "finish",
              "RequestHandler");
   logger.useDefaultFormatter();
-  logger.log(LogLevel::INFO, "Default restored", "finish", "RequestHandler");
+  logger.log(LOGLEVEL::INFO, "Default restored", "finish", "RequestHandler");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 2U);
@@ -770,10 +759,10 @@ TEST(LoggerDesignTest, ScopedSettingsRestoreFormatter) {
   {
     ScopedSettings settings = logger.scopedSettings();
     logger.setFormatter(std::make_shared<CompactLogFormatter>());
-    logger.log(LogLevel::INFO, "Compact", "formatTest");
+    logger.log(LOGLEVEL::INFO, "Compact", "formatTest");
   }
 
-  logger.log(LogLevel::INFO, "Default", "formatTest");
+  logger.log(LOGLEVEL::INFO, "Default", "formatTest");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 2U);
@@ -793,7 +782,7 @@ TEST(LoggerDesignTest, FormatterUseIsSerializedAcrossThreads) {
   for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex) {
     threads.push_back(std::thread([&logger] {
       for (int messageIndex = 0; messageIndex < messagesPerThread; ++messageIndex)
-        logger.log(LogLevel::INFO, "message");
+        logger.log(LOGLEVEL::INFO, "message");
     }));
   }
 
@@ -817,7 +806,7 @@ TEST(LoggerDesignTest, FormatterCanBeReplacedWhileAnotherThreadLogs) {
   std::thread loggingThread([&logger, &loggingStarted] {
     loggingStarted.store(true);
     for (int messageIndex = 0; messageIndex < messageCount; ++messageIndex)
-      logger.log(LogLevel::INFO, "Concurrent message", "writer");
+      logger.log(LOGLEVEL::INFO, "Concurrent message", "writer");
   });
 
   while (!loggingStarted.load())
@@ -846,15 +835,15 @@ TEST(LoggerDesignTest, ScopedSettingsRestoreColorMode) {
   {
     ScopedSettings settings = logger.scopedSettings();
     logger.setColorEnabled(true);
-    logger.log(LogLevel::INFO, "Colored in scope", "colorTest");
+    logger.log(LOGLEVEL::INFO, "Colored in scope", "colorTest");
     EXPECT_EQ(sink->colorMode, ColorMode::ENABLED);
   }
 
-  logger.log(LogLevel::INFO, "Disabled mode restored", "colorTest");
+  logger.log(LOGLEVEL::INFO, "Disabled mode restored", "colorTest");
   EXPECT_EQ(sink->colorMode, ColorMode::DISABLED);
 
   logger.useAutomaticColor();
-  logger.log(LogLevel::INFO, "Automatic mode restored", "colorTest");
+  logger.log(LOGLEVEL::INFO, "Automatic mode restored", "colorTest");
   EXPECT_EQ(sink->colorMode, ColorMode::AUTOMATIC);
 }
 
@@ -862,18 +851,20 @@ TEST(LoggerDesignTest, NestedSettingsRestoreInOrder) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
 
-  logger.pushLogSetting();
-  logger.setLogLevel(LogLevel::ERROR);
-  logger.log(LogLevel::INFO, "Hidden outer", "nestedSettingsTest");
+  {
+    ScopedSettings outerSettings = logger.scopedSettings();
+    logger.setLogLevel(LOGLEVEL::ERROR);
+    logger.log(LOGLEVEL::INFO, "Hidden outer", "nestedSettingsTest");
 
-  logger.pushLogSetting();
-  logger.setLogLevel(LogLevel::DEBUG);
-  logger.log(LogLevel::INFO, "Visible inner", "nestedSettingsTest");
-  logger.popLogSetting();
+    {
+      ScopedSettings innerSettings = logger.scopedSettings();
+      logger.setLogLevel(LOGLEVEL::DEBUG);
+      logger.log(LOGLEVEL::INFO, "Visible inner", "nestedSettingsTest");
+    }
 
-  logger.log(LogLevel::INFO, "Hidden outer again", "nestedSettingsTest");
-  logger.popLogSetting();
-  logger.log(LogLevel::INFO, "Visible restored", "nestedSettingsTest");
+    logger.log(LOGLEVEL::INFO, "Hidden outer again", "nestedSettingsTest");
+  }
+  logger.log(LOGLEVEL::INFO, "Visible restored", "nestedSettingsTest");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 2U);
@@ -884,34 +875,34 @@ TEST(LoggerDesignTest, NestedSettingsRestoreInOrder) {
 TEST(LoggerDesignTest, OverlappingScopedSettingsAreIsolatedByThread) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
 
   std::atomic<int> readyThreads(0);
 
   std::thread restrictiveThread([&logger, &readyThreads]() {
     ScopedSettings settings = logger.scopedSettings();
-    logger.setLogLevel(LogLevel::ERROR);
+    logger.setLogLevel(LOGLEVEL::ERROR);
     ++readyThreads;
     while (readyThreads.load() != 2)
       std::this_thread::yield();
 
-    logger.log(LogLevel::INFO, "Restrictive thread hidden", "restrictiveThread");
-    logger.log(LogLevel::ERROR, "Restrictive thread visible", "restrictiveThread");
+    logger.log(LOGLEVEL::INFO, "Restrictive thread hidden", "restrictiveThread");
+    logger.log(LOGLEVEL::ERROR, "Restrictive thread visible", "restrictiveThread");
   });
 
   std::thread verboseThread([&logger, &readyThreads]() {
     ScopedSettings settings = logger.scopedSettings();
-    logger.setLogLevel(LogLevel::DEBUG);
+    logger.setLogLevel(LOGLEVEL::DEBUG);
     ++readyThreads;
     while (readyThreads.load() != 2)
       std::this_thread::yield();
 
-    logger.log(LogLevel::DEBUG, "Verbose thread visible", "verboseThread");
+    logger.log(LOGLEVEL::DEBUG, "Verbose thread visible", "verboseThread");
   });
 
   restrictiveThread.join();
   verboseThread.join();
-  logger.log(LogLevel::INFO, "Global settings preserved", "mainThread");
+  logger.log(LOGLEVEL::INFO, "Global settings preserved", "mainThread");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 3U);
@@ -929,24 +920,24 @@ TEST(LoggerDesignTest, OverlappingScopedSettingsAreIsolatedByThread) {
 TEST(LoggerDesignTest, NestedScopedSettingsRemainLocalToTheirThread) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
 
   std::thread worker([&logger]() {
     ScopedSettings outer = logger.scopedSettings();
-    logger.setLogLevel(LogLevel::ERROR);
-    logger.log(LogLevel::INFO, "Outer hidden before nested scope", "worker");
+    logger.setLogLevel(LOGLEVEL::ERROR);
+    logger.log(LOGLEVEL::INFO, "Outer hidden before nested scope", "worker");
 
     {
       ScopedSettings inner = logger.scopedSettings();
-      logger.setLogLevel(LogLevel::DEBUG);
-      logger.log(LogLevel::DEBUG, "Inner visible", "worker");
+      logger.setLogLevel(LOGLEVEL::DEBUG);
+      logger.log(LOGLEVEL::DEBUG, "Inner visible", "worker");
     }
 
-    logger.log(LogLevel::INFO, "Outer hidden after nested scope", "worker");
+    logger.log(LOGLEVEL::INFO, "Outer hidden after nested scope", "worker");
   });
 
   worker.join();
-  logger.log(LogLevel::INFO, "Global visible after worker scope", "mainThread");
+  logger.log(LOGLEVEL::INFO, "Global visible after worker scope", "mainThread");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 2U);
@@ -957,30 +948,30 @@ TEST(LoggerDesignTest, NestedScopedSettingsRemainLocalToTheirThread) {
 TEST(LoggerDesignTest, GlobalChangesSurviveWhileAnotherThreadHasScopedSettings) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
 
   std::atomic<bool> workerScopeReady(false);
   std::atomic<bool> globalStateChanged(false);
 
   std::thread worker([&logger, &workerScopeReady, &globalStateChanged]() {
     ScopedSettings settings = logger.scopedSettings();
-    logger.setLogLevel(LogLevel::ERROR);
+    logger.setLogLevel(LOGLEVEL::ERROR);
     workerScopeReady.store(true);
     while (!globalStateChanged.load())
       std::this_thread::yield();
 
-    logger.log(LogLevel::INFO, "Worker local setting preserved", "worker");
-    logger.log(LogLevel::ERROR, "Worker error visible", "worker");
+    logger.log(LOGLEVEL::INFO, "Worker local setting preserved", "worker");
+    logger.log(LOGLEVEL::ERROR, "Worker error visible", "worker");
   });
 
   while (!workerScopeReady.load())
     std::this_thread::yield();
-  logger.setLogLevel(LogLevel::DEBUG);
-  logger.log(LogLevel::DEBUG, "Global change visible", "mainThread");
+  logger.setLogLevel(LOGLEVEL::DEBUG);
+  logger.log(LOGLEVEL::DEBUG, "Global change visible", "mainThread");
   globalStateChanged.store(true);
 
   worker.join();
-  logger.log(LogLevel::DEBUG, "Global change survived", "mainThread");
+  logger.log(LOGLEVEL::DEBUG, "Global change survived", "mainThread");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 3U);
@@ -998,101 +989,91 @@ TEST(LoggerDesignTest, GlobalChangesSurviveWhileAnotherThreadHasScopedSettings) 
 TEST(LoggerDesignTest, MovedScopedSettingsRestoresItsCreatingThread) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
 
   ScopedSettings settings = logger.scopedSettings();
-  logger.setLogLevel(LogLevel::ERROR);
-  logger.log(LogLevel::INFO, "Hidden by temporary setting", "mainThread");
+  logger.setLogLevel(LOGLEVEL::ERROR);
+  logger.log(LOGLEVEL::INFO, "Hidden by temporary setting", "mainThread");
 
   // ScopedSettings is movable. Even when its destructor runs elsewhere, it
   // must remove the override from the thread that created the scope.
   std::thread cleanupThread([](ScopedSettings) {}, std::move(settings));
   cleanupThread.join();
 
-  logger.log(LogLevel::INFO, "Creating thread restored", "mainThread");
+  logger.log(LOGLEVEL::INFO, "Creating thread restored", "mainThread");
 
   const std::vector<std::string> logs = sink->getLogs();
   ASSERT_EQ(logs.size(), 1U);
   EXPECT_NE(logs[0].find("Creating thread restored"), std::string::npos);
 }
 
-TEST(LoggerDesignTest, EmptySettingsPopIsHarmless) {
-  Logger                              logger(false);
-  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-
-  logger.popLogSetting();
-  logger.log(LogLevel::INFO, "Still configured", "emptyPopTest");
-
-  EXPECT_EQ(sink->getLogs().size(), 1U);
-}
-
 TEST(LoggerDesignTest, AlwaysAndVerboseThresholdSemanticsArePreserved) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
 
-  logger.setLogLevel(LogLevel::FATAL);
-  logger.log(LogLevel::ALWAYS, "Always passes threshold", "levelTest");
-  logger.log(LogLevel::VERBOSE, "Verbose hidden", "levelTest");
-  logger.setLogLevel(LogLevel::VERBOSE);
-  logger.log(LogLevel::VERBOSE, "Verbose visible", "levelTest");
+  logger.setLogLevel(LOGLEVEL::FATAL);
+  logger.log(LOGLEVEL::ALWAYS, "Always passes threshold", "levelTest");
+  logger.log(LOGLEVEL::VERBOSE, "Verbose hidden", "levelTest");
+  logger.setLogLevel(LOGLEVEL::VERBOSE);
+  logger.log(LOGLEVEL::VERBOSE, "Verbose visible", "levelTest");
 
   ASSERT_EQ(sink->getLogs().size(), 2U);
-  logger.setFilterLevels({LogLevel::ERROR});
-  logger.log(LogLevel::ALWAYS, "Always filtered by whitelist", "levelTest");
+  logger.setFilterLevels({LOGLEVEL::ERROR});
+  logger.log(LOGLEVEL::ALWAYS, "Always filtered by whitelist", "levelTest");
   EXPECT_EQ(sink->getLogs().size(), 2U);
 }
 
 TEST(LoggerDesignTest, IsEnabledUsesThresholdAndFilter) {
   Logger logger(false);
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
 
-  EXPECT_TRUE(logger.isEnabled(LogLevel::ERROR));
-  EXPECT_TRUE(logger.isEnabled(LogLevel::INFO));
-  EXPECT_FALSE(logger.isEnabled(LogLevel::DEBUG));
+  EXPECT_TRUE(logger.isEnabled(LOGLEVEL::ERROR));
+  EXPECT_TRUE(logger.isEnabled(LOGLEVEL::INFO));
+  EXPECT_FALSE(logger.isEnabled(LOGLEVEL::DEBUG));
 
-  logger.setFilterLevels({LogLevel::ERROR});
-  EXPECT_TRUE(logger.isEnabled(LogLevel::ERROR));
-  EXPECT_FALSE(logger.isEnabled(LogLevel::INFO));
+  logger.setFilterLevels({LOGLEVEL::ERROR});
+  EXPECT_TRUE(logger.isEnabled(LOGLEVEL::ERROR));
+  EXPECT_FALSE(logger.isEnabled(LOGLEVEL::INFO));
 
   {
     ScopedSettings settings = logger.scopedSettings();
     logger.clearFilterLevels();
-    logger.setLogLevel(LogLevel::DEBUG);
-    EXPECT_TRUE(logger.isEnabled(LogLevel::DEBUG));
+    logger.setLogLevel(LOGLEVEL::DEBUG);
+    EXPECT_TRUE(logger.isEnabled(LOGLEVEL::DEBUG));
   }
 
-  EXPECT_FALSE(logger.isEnabled(LogLevel::DEBUG));
+  EXPECT_FALSE(logger.isEnabled(LOGLEVEL::DEBUG));
 }
 
 TEST(LoggerDesignTest, RejectedEagerMessageIsNotConvertedToText) {
   Logger logger(false);
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
   int streamCount = 0;
 
-  logger.log(LogLevel::DEBUG, StreamCountingMessage(streamCount), "eagerTest");
+  logger.log(LOGLEVEL::DEBUG, StreamCountingMessage(streamCount), "eagerTest");
 
   EXPECT_EQ(streamCount, 0);
 }
 
 TEST(LoggerDesignTest, IsEnabledAvoidsConstructingRejectedMessage) {
   Logger logger(false);
-  logger.setLogLevel(LogLevel::INFO);
+  logger.setLogLevel(LOGLEVEL::INFO);
   int buildCount = 0;
 
-  if (logger.isEnabled(LogLevel::DEBUG))
-    logger.log(LogLevel::DEBUG, buildCountedMessage(buildCount), "guardedTest");
+  if (logger.isEnabled(LOGLEVEL::DEBUG))
+    logger.log(LOGLEVEL::DEBUG, buildCountedMessage(buildCount), "guardedTest");
 
   EXPECT_EQ(buildCount, 0);
 }
 
 TEST(LoggerDesignTest, IsEnabledAvoidsConstructingFilteredMessage) {
   Logger logger(false);
-  logger.setLogLevel(LogLevel::DEBUG);
-  logger.setFilterLevels({LogLevel::ERROR});
+  logger.setLogLevel(LOGLEVEL::DEBUG);
+  logger.setFilterLevels({LOGLEVEL::ERROR});
   int buildCount = 0;
 
-  if (logger.isEnabled(LogLevel::DEBUG))
-    logger.log(LogLevel::DEBUG, buildCountedMessage(buildCount), "guardedFilterTest");
+  if (logger.isEnabled(LOGLEVEL::DEBUG))
+    logger.log(LOGLEVEL::DEBUG, buildCountedMessage(buildCount), "guardedFilterTest");
 
   EXPECT_EQ(buildCount, 0);
 }
@@ -1102,17 +1083,9 @@ TEST(LoggerDesignTest, ReentrantCustomSinkDoesNotDeadlock) {
   const std::shared_ptr<ReentrantSink> sink = std::make_shared<ReentrantSink>(logger);
   logger.addSink(sink);
 
-  logger.log(LogLevel::INFO, "Outer message", "reentrantTest");
+  logger.log(LOGLEVEL::INFO, "Outer message", "reentrantTest");
 
   EXPECT_EQ(sink->messageCount, 2);
-}
-
-TEST(LoggerDesignTest, OriginalLogLevelNameRemainsCompatible) {
-  Logger                              logger(false);
-  const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.log(LOGLEVELL::INFO, "Compatibility", "compatibilityTest");
-
-  EXPECT_EQ(sink->getLogs().size(), 1U);
 }
 
 TEST(LoggerDesignTest, SignatureParserHandlesSupportedCompilerFormats) {
@@ -1255,7 +1228,7 @@ TEST(LoggerDesignTest, SignatureParserHandlesFallbackAndLambda) {
 TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
-  logger.setLogLevel(LogLevel::VERBOSE);
+  logger.setLogLevel(LOGLEVEL::VERBOSE);
 
   const int                threadCount       = 8;
   const int                messagesPerThread = 100;
@@ -1263,7 +1236,7 @@ TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
   for (int thread = 0; thread < threadCount; ++thread) {
     threads.push_back(std::thread([&logger]() {
       for (int message = 0; message < messagesPerThread; ++message)
-        logger.log(LogLevel::DEBUG, message, "worker");
+        logger.log(LOGLEVEL::DEBUG, message, "worker");
     }));
   }
   for (std::vector<std::thread>::iterator thread = threads.begin(); thread != threads.end(); ++thread)

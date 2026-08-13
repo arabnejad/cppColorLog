@@ -12,7 +12,7 @@ public:
 
   std::string format(const LogEntry &entry) const override {
     std::ostringstream output;
-    output << entry.timestamp << ' ' << (entry.level == LogLevel::INFO ? "I" : toString(entry.level)) << ' '
+    output << entry.timestamp << ' ' << (entry.level == LOGLEVEL::INFO ? "I" : toString(entry.level)) << ' '
            << entry.function << " | " << entry.message;
 
     if (!entry.fields.empty()) {
@@ -29,7 +29,7 @@ public:
 };
 
 void logCompletedRequest() {
-  LOGGER_LOG_FIELDS(LogLevel::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+  LOGGER_LOG_FIELDS(LOGLEVEL::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
 }
 
 int main() {

@@ -4,33 +4,33 @@
 #include "cppColorLogger/logger.h"
 
 void refreshCache() {
-  LOGGER_LOG(LogLevel::INFO, "Free function");
+  LOGGER_LOG(LOGLEVEL::INFO, "Free function");
 }
 
 template <typename T> void process(const T &) {
-  LOGGER_LOG(LogLevel::INFO, "Function template");
+  LOGGER_LOG(LOGLEVEL::INFO, "Function template");
 }
 
 class Service {
 public:
   Service() {
-    LOGGER_LOG(LogLevel::INFO, "Constructor");
+    LOGGER_LOG(LOGLEVEL::INFO, "Constructor");
   }
 
   ~Service() {
-    LOGGER_LOG(LogLevel::INFO, "Destructor");
+    LOGGER_LOG(LOGLEVEL::INFO, "Destructor");
   }
 
   void start() {
-    LOGGER_LOG(LogLevel::INFO, "Member function");
+    LOGGER_LOG(LOGLEVEL::INFO, "Member function");
   }
 
   static void reportStatus() {
-    LOGGER_LOG(LogLevel::INFO, "Static member function");
+    LOGGER_LOG(LOGLEVEL::INFO, "Static member function");
   }
 
   bool operator()(int) const {
-    LOGGER_LOG(LogLevel::INFO, "Function-call operator");
+    LOGGER_LOG(LOGLEVEL::INFO, "Function-call operator");
     return true;
   }
 };
@@ -40,17 +40,17 @@ struct User {};
 template <typename T> class Repository {
 public:
   void save(const T &) {
-    LOGGER_LOG(LogLevel::INFO, "Class template");
+    LOGGER_LOG(LOGLEVEL::INFO, "Class template");
   }
 
   template <typename U> void convert(const U &) {
-    LOGGER_LOG(LogLevel::INFO, "Class and member templates");
+    LOGGER_LOG(LOGLEVEL::INFO, "Class and member templates");
   }
 };
 
 int main() {
   std::printf("Example 15: Automatic and explicit source contexts.\n");
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
 
   refreshCache();
 
@@ -66,13 +66,13 @@ int main() {
   repository.save(user);
   repository.convert(std::make_pair(1, 2.0));
 
-  const auto automaticLambda = []() { LOGGER_LOG(LogLevel::INFO, "Cache refreshed"); };
+  const auto automaticLambda = []() { LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed"); };
   automaticLambda();
 
-  const auto namedLambda = []() { LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "refreshCache", "Cache refreshed"); };
+  const auto namedLambda = []() { LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, "refreshCache", "Cache refreshed"); };
   namedLambda();
 
-  LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "UserRepository::save", "Saving user");
+  LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, "UserRepository::save", "Saving user");
 
   return 0;
 }

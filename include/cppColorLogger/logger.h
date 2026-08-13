@@ -15,13 +15,8 @@
 #include <sstream>
 #include <string>
 #include <thread>
-#include <typeinfo>
 #include <utility>
 #include <vector>
-
-#if defined(__GNUG__)
-#include <cxxabi.h>
-#endif
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -44,9 +39,29 @@ static const char CYAN[]    = "\033[36m";
 static const char WHITE[]   = "\033[37m";
 } // namespace Color
 
-namespace cppcolorlog {
+enum class LOGLEVEL { ALWAYS, FATAL, ERROR, WARN, INFO, DEBUG, VERBOSE };
 
-enum class LogLevel { ALWAYS, FATAL, ERROR, WARN, INFO, DEBUG, VERBOSE };
+inline const char *toString(LOGLEVEL level) {
+  switch (level) {
+  case LOGLEVEL::ALWAYS:
+    return "ALWAYS";
+  case LOGLEVEL::FATAL:
+    return "FATAL";
+  case LOGLEVEL::ERROR:
+    return "ERROR";
+  case LOGLEVEL::WARN:
+    return "WARN";
+  case LOGLEVEL::INFO:
+    return "INFO";
+  case LOGLEVEL::DEBUG:
+    return "DEBUG";
+  case LOGLEVEL::VERBOSE:
+    return "VERBOSE";
+  }
+  return "UNKNOWN";
+}
+
+namespace cppcolorlog {
 
 // AUTOMATIC is the safe default: use color for a supported interactive terminal,
 // but not for redirected output or when NO_COLOR is set. ENABLED always emits
@@ -60,36 +75,6 @@ enum class FileOpenMode { APPEND, TRUNCATE };
 // A vector keeps fields in the order supplied by the caller. Using strings for
 // both parts keeps the C++11 API small and predictable.
 using LogFields = std::vector<std::pair<std::string, std::string>>;
-
-inline const char *toString(LogLevel level) {
-  switch (level) {
-  case LogLevel::ALWAYS:
-    return "ALWAYS";
-  case LogLevel::FATAL:
-    return "FATAL";
-  case LogLevel::ERROR:
-    return "ERROR";
-  case LogLevel::WARN:
-    return "WARN";
-  case LogLevel::INFO:
-    return "INFO";
-  case LogLevel::DEBUG:
-    return "DEBUG";
-  case LogLevel::VERBOSE:
-    return "VERBOSE";
-  }
-  return "UNKNOWN";
-}
-
-inline std::string demangle(const char *name) {
-#if defined(__GNUG__)
-  int                                     status = 0;
-  std::unique_ptr<char, void (*)(void *)> result(abi::__cxa_demangle(name, nullptr, nullptr, &status), std::free);
-  return status == 0 && result ? result.get() : name;
-#else
-  return name;
-#endif
-}
 
 /**
  * @namespace detail
@@ -595,7 +580,7 @@ inline bool shouldUseConsoleColor(ColorMode mode) {
 // Existing sinks can continue using text. Structured sinks can use the separate
 // values below without parsing that human-readable text.
 struct LogEntry {
-  LogLevel    level;     // Message severity, such as INFO, WARN, or ERROR.
+  LOGLEVEL    level;     // Message severity, such as INFO, WARN, or ERROR.
   std::string text;      // Complete human-readable line that a basic sink can write directly.
   std::string color;     // ANSI color selected for this level; used by color-capable sinks.
   ColorMode   colorMode; // Determines whether console color is automatic, enabled, or disabled.
@@ -775,29 +760,14 @@ public:
     return true;
   }
 
-  // This string-only method keeps existing custom sinks source-compatible.
-  virtual void write(const std::string &message) = 0;
-
-  // Richer sinks can override this overload to inspect level and color.
-  virtual void write(const LogEntry &entry) {
-    write(entry.text);
-  }
+  /** Receives the formatted text and the original structured log data. */
+  virtual void write(const LogEntry &entry) = 0;
 };
 
 class ConsoleSink : public LogSink {
 public:
   bool supportsColor() const override {
     return true;
-  }
-
-  void write(const std::string &message) override {
-    LogEntry entry  = {};
-    entry.level     = LogLevel::ALWAYS;
-    entry.text      = message;
-    entry.color     = Color::WHITE;
-    entry.colorMode = ColorMode::AUTOMATIC;
-    entry.message   = message;
-    write(entry);
   }
 
   void write(const LogEntry &entry) override {
@@ -834,12 +804,12 @@ public:
       m_lastError = "Failed to open log file '" + m_filename + "'.";
   }
 
-  void write(const std::string &message) override {
+  void write(const LogEntry &entry) override {
     std::lock_guard<std::mutex> file_lck(m_file_mux);
     if (!m_lastError.empty())
       return;
 
-    m_file << message << std::endl;
+    m_file << entry.text << std::endl;
     if (!m_file)
       m_lastError = "Failed to write to log file '" + m_filename + "'.";
   }
@@ -884,9 +854,9 @@ private:
 
 class InMemorySink : public LogSink {
 public:
-  void write(const std::string &message) override {
+  void write(const LogEntry &entry) override {
     std::lock_guard<std::mutex> logs_lck(m_logs_mux);
-    m_logs.push_back(message);
+    m_logs.push_back(entry.text);
   }
 
   std::vector<std::string> getLogs() const {
@@ -906,12 +876,12 @@ private:
 
 struct LoggerState {
   LoggerState()
-      : logLevel(LogLevel::INFO),
+      : logLevel(LOGLEVEL::INFO),
         colors{{Color::WHITE, Color::MAGENTA, Color::RED, Color::YELLOW, Color::GREEN, Color::CYAN, Color::BLUE}},
         colorMode(ColorMode::AUTOMATIC), formatter(std::make_shared<DefaultLogFormatter>()) {}
 
-  LogLevel                                        logLevel;
-  std::set<LogLevel>                              filterLevels;
+  LOGLEVEL                                        logLevel;
+  std::set<LOGLEVEL>                              filterLevels;
   std::array<std::string, 7>                      colors;
   ColorMode                                       colorMode;
   std::map<std::size_t, std::shared_ptr<LogSink>> sinks;
@@ -946,12 +916,12 @@ public:
   Logger(const Logger &)            = delete;
   Logger &operator=(const Logger &) = delete;
 
-  void setLogLevel(LogLevel level) {
+  void setLogLevel(LOGLEVEL level) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).logLevel = level;
   }
 
-  void setLevelColor(LogLevel level, const std::string &color) {
+  void setLevelColor(LOGLEVEL level, const std::string &color) {
     const std::size_t           index = levelIndex(level);
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
@@ -1061,11 +1031,6 @@ public:
     return sink;
   }
 
-  // Compatibility name: file output has always appended another sink.
-  void setFileOutput(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) {
-    addFileSink(filename, mode);
-  }
-
   std::shared_ptr<InMemorySink> enableInMemorySink() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     LoggerState                &state = activeStateLocked(std::this_thread::get_id());
@@ -1107,29 +1072,14 @@ public:
     return succeeded;
   }
 
-  void setFilterLevels(std::initializer_list<LogLevel> levels) {
+  void setFilterLevels(std::initializer_list<LOGLEVEL> levels) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).filterLevels = std::set<LogLevel>(levels.begin(), levels.end());
+    activeStateLocked(std::this_thread::get_id()).filterLevels = std::set<LOGLEVEL>(levels.begin(), levels.end());
   }
 
   void clearFilterLevels() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     activeStateLocked(std::this_thread::get_id()).filterLevels.clear();
-  }
-
-  // Create a temporary settings copy for the current thread. If this thread
-  // already has a temporary copy, use it as the starting point; otherwise,
-  // copy the global settings. Changes then affect only this temporary copy
-  // until popLogSetting() restores the previous settings.
-  void pushLogSetting() {
-    std::lock_guard<std::mutex> state_lck(m_state_mux);
-    const std::thread::id       threadId = std::this_thread::get_id();
-    std::vector<LoggerState>   &stack    = m_scopedStateStacks[threadId];
-    stack.push_back(stack.empty() ? m_globalState : stack.back());
-  }
-
-  void popLogSetting() {
-    popLogSettingForThread(std::this_thread::get_id());
   }
 
   ScopedSettings scopedSettings();
@@ -1144,19 +1094,19 @@ public:
    * @param level The level that a future message would use.
    * @return True when the level passes both the threshold and filter.
    */
-  bool isEnabled(LogLevel level) const {
+  bool isEnabled(LOGLEVEL level) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     return acceptsLevel(activeStateLocked(std::this_thread::get_id()), level);
   }
 
   template <typename T>
-  void log(LogLevel level, const T &message, const std::string &function = "", const std::string &className = "") {
+  void log(LOGLEVEL level, const T &message, const std::string &function = "", const std::string &className = "") {
     logImpl(level, message, LogFields(), function, className);
   }
 
   /** Logs a message with ordered key/value fields for structured sinks. */
   template <typename T>
-  void log(LogLevel level, const T &message, const LogFields &fields, const std::string &function = "",
+  void log(LOGLEVEL level, const T &message, const LogFields &fields, const std::string &function = "",
            const std::string &className = "") {
     logImpl(level, message, fields, function, className);
   }
@@ -1165,7 +1115,7 @@ private:
   friend class ScopedSettings;
 
   template <typename T>
-  void logImpl(LogLevel level, const T &message, const LogFields &fields, const std::string &function,
+  void logImpl(LOGLEVEL level, const T &message, const LogFields &fields, const std::string &function,
                const std::string &className) {
     // Avoid converting a rejected value to text. Expressions passed as
     // `message` have already been evaluated by the caller; use isEnabled()
@@ -1201,7 +1151,7 @@ private:
       sinks.push_back(sink->second);
   }
 
-  static std::size_t levelIndex(LogLevel level) {
+  static std::size_t levelIndex(LOGLEVEL level) {
     return static_cast<std::size_t>(level);
   }
 
@@ -1218,11 +1168,17 @@ private:
   }
 
   // Keep the threshold and filter rule in one place for isEnabled() and log().
-  static bool acceptsLevel(const LoggerState &state, LogLevel level) {
+  static bool acceptsLevel(const LoggerState &state, LOGLEVEL level) {
     return level <= state.logLevel && (state.filterLevels.empty() || state.filterLevels.count(level) != 0);
   }
 
-  void popLogSettingForThread(const std::thread::id &threadId) {
+  void beginSettingsOverride(const std::thread::id &threadId) {
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
+    std::vector<LoggerState>   &stack = m_scopedStateStacks[threadId];
+    stack.push_back(stack.empty() ? m_globalState : stack.back());
+  }
+
+  void endSettingsOverride(const std::thread::id &threadId) {
     std::lock_guard<std::mutex>                                   state_lck(m_state_mux);
     std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadId);
     if (stack == m_scopedStateStacks.end() || stack->second.empty())
@@ -1235,7 +1191,7 @@ private:
 
   // Check the level and copy the selected color, formatter, and sinks while
   // holding the state lock. Formatting and output happen after releasing it.
-  bool tryCaptureOutputSettings(LogLevel level, OutputSettings &outputSettings) const {
+  bool tryCaptureOutputSettings(LOGLEVEL level, OutputSettings &outputSettings) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
     if (!acceptsLevel(state, level))
@@ -1249,7 +1205,7 @@ private:
     return true;
   }
 
-  void formatAndWriteToSinks(LogLevel level, const std::string &message, const LogFields &fields,
+  void formatAndWriteToSinks(LOGLEVEL level, const std::string &message, const LogFields &fields,
                              const std::string &function, const std::string &className,
                              const OutputSettings &outputSettings) {
     LogEntry entry  = {};
@@ -1286,12 +1242,12 @@ private:
 class ScopedSettings {
 public:
   explicit ScopedSettings(Logger &logger) : m_logger(&logger), m_ownerThread(std::this_thread::get_id()) {
-    m_logger->pushLogSetting();
+    m_logger->beginSettingsOverride(m_ownerThread);
   }
 
   ~ScopedSettings() {
     if (m_logger)
-      m_logger->popLogSettingForThread(m_ownerThread);
+      m_logger->endSettingsOverride(m_ownerThread);
   }
 
   ScopedSettings(ScopedSettings &&other) : m_logger(other.m_logger), m_ownerThread(other.m_ownerThread) {
@@ -1319,9 +1275,7 @@ inline Logger &defaultLogger() {
 
 } // namespace cppcolorlog
 
-// Compatibility aliases preserve the original public API.
-using LogLevel            = cppcolorlog::LogLevel;
-using LOGLEVELL           = cppcolorlog::LogLevel;
+// Short global names keep the public API easy to use without a namespace prefix.
 using ColorMode           = cppcolorlog::ColorMode;
 using FileOpenMode        = cppcolorlog::FileOpenMode;
 using LogFields           = cppcolorlog::LogFields;
@@ -1335,12 +1289,7 @@ using FileSink            = cppcolorlog::FileSink;
 using InMemorySink        = cppcolorlog::InMemorySink;
 using LoggerState         = cppcolorlog::LoggerState;
 using Logger              = cppcolorlog::Logger;
-using LoggerSettings      = cppcolorlog::Logger;
 using ScopedSettings      = cppcolorlog::ScopedSettings;
-
-inline std::string demangle(const char *name) {
-  return cppcolorlog::demangle(name);
-}
 
 /** The shared logger instance used by the convenience macros. */
 #define LOGGER (::cppcolorlog::defaultLogger())
@@ -1357,7 +1306,7 @@ inline std::string demangle(const char *name) {
 
 /**
  * Logs a message and automatically detects its function or class-method name.
- * Example: LOGGER_LOG(LogLevel::INFO, "Server started");
+ * Example: LOGGER_LOG(LOGLEVEL::INFO, "Server started");
  */
 #define LOGGER_LOG(level, message)                                                                                     \
   ::cppcolorlog::defaultLogger().log(                                                                                  \
@@ -1366,7 +1315,7 @@ inline std::string demangle(const char *name) {
 /**
  * Logs a message with key/value fields and automatic source context.
  * The variadic parameter allows a braced field list to contain commas.
- * Example: LOGGER_LOG_FIELDS(LogLevel::INFO, "Done", {{"status", "200"}});
+ * Example: LOGGER_LOG_FIELDS(LOGLEVEL::INFO, "Done", {{"status", "200"}});
  */
 #define LOGGER_LOG_FIELDS(level, message, ...)                                                                         \
   ::cppcolorlog::defaultLogger().log(                                                                                  \
@@ -1375,12 +1324,8 @@ inline std::string demangle(const char *name) {
 /**
  * Logs with a name chosen by the caller. Prefer this for meaningful lambda
  * names or context text that must be identical on every compiler.
- * Example: LOGGER_LOG_WITH_CONTEXT(LogLevel::INFO, "worker", "Task started");
+ * Example: LOGGER_LOG_WITH_CONTEXT(LOGLEVEL::INFO, "worker", "Task started");
  */
 #define LOGGER_LOG_WITH_CONTEXT(level, context, message) ::cppcolorlog::defaultLogger().log(level, message, context)
-
-#define LOGGER_C(level, message)                                                                                       \
-  ::cppcolorlog::defaultLogger().log(level, message, __func__, ::cppcolorlog::demangle(typeid(*this).name()))
-#define LOGGER_F(level, message) ::cppcolorlog::defaultLogger().log(level, message, __func__)
 
 #endif // CPPCOLORLOGGER_LOGGER_H

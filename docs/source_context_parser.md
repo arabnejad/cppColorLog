@@ -5,25 +5,25 @@ how its automatic function names work internally.
 
 ## If you only want to use the logger
 
-You do not need to call any function in `cppcolorlog::detail`. For normal code,
-use `LOGGER_LOG`:
+You do not need to call any internal source-context parser function. For normal
+code, use `LOGGER_LOG`:
 
 ```cpp
 #include "cppColorLogger/logger.h"
 
 void refreshCache() {
-  LOGGER_LOG(LogLevel::INFO, "Cache refreshed");
+  LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed");
 }
 
 class Service {
 public:
   void start() {
-    LOGGER_LOG(LogLevel::INFO, "Service started");
+    LOGGER_LOG(LOGLEVEL::INFO, "Service started");
   }
 };
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   refreshCache();
 
   Service service;
@@ -47,8 +47,8 @@ Follow these three rules:
    constructors, destructors, operators, and templates.
 2. Use `LOGGER_LOG_WITH_CONTEXT(level, context, message)` when a lambda needs a
    useful name or when the context must be exactly the same on every compiler.
-3. Do not use the functions in `cppcolorlog::detail` from application code.
-   They are private implementation helpers used by the logging macros.
+3. Do not call the internal parser functions from application code. They are
+   private implementation helpers used by the logging macros.
 
 If that is all you need, you can stop reading here. The remaining sections
 explain the implementation in `logger.h`.
@@ -123,7 +123,7 @@ Consider this method:
 
 ```cpp
 void Service::start() {
-  LOGGER_LOG(LogLevel::INFO, "Service started");
+  LOGGER_LOG(LOGLEVEL::INFO, "Service started");
 }
 ```
 
@@ -287,11 +287,11 @@ For a free function template:
 
 template <typename T>
 void process(const T &) {
-  LOGGER_LOG(LogLevel::INFO, "Function template");
+  LOGGER_LOG(LOGLEVEL::INFO, "Function template");
 }
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   process(42); // T is int
 }
 ```
@@ -321,14 +321,14 @@ template <typename T>
 class Repository {
 public:
   void save(const T &) {
-    LOGGER_LOG(LogLevel::INFO, "Class template");
+    LOGGER_LOG(LOGLEVEL::INFO, "Class template");
   }
 };
 
 struct User {};
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   Repository<User> users;
   users.save(User());
 }
@@ -380,14 +380,14 @@ class Repository {
 public:
   template <typename U>
   void convert(const U &) {
-    LOGGER_LOG(LogLevel::INFO, "Class and member templates");
+    LOGGER_LOG(LOGLEVEL::INFO, "Class and member templates");
   }
 };
 
 struct User {};
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   Repository<User> repository;
   repository.convert(std::make_pair(1, 2.0));
 }
@@ -456,9 +456,9 @@ not part of its function signature:
 #include "cppColorLogger/logger.h"
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   const auto refreshCache = []() {
-    LOGGER_LOG(LogLevel::INFO, "Cache refreshed");
+    LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed");
   };
   refreshCache();
 }
@@ -471,10 +471,10 @@ it explicitly:
 #include "cppColorLogger/logger.h"
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   const auto refreshCache = []() {
     LOGGER_LOG_WITH_CONTEXT(
-        LogLevel::INFO,
+        LOGLEVEL::INFO,
         "refreshCache",
         "Cache refreshed");
   };
@@ -499,13 +499,13 @@ explicit context when you do not want them in the log:
 
 void saveUser() {
   LOGGER_LOG_WITH_CONTEXT(
-      LogLevel::INFO,
+      LOGLEVEL::INFO,
       "UserRepository::save",
       "Saving user");
 }
 
 int main() {
-  LOGGER.setLogLevel(LogLevel::INFO);
+  LOGGER.setLogLevel(LOGLEVEL::INFO);
   saveUser();
 }
 ```
@@ -555,11 +555,11 @@ When adding support or fixing an edge case:
 
 1. Copy the exact compiler signature into a test in `tests/test_logger.cpp`.
 2. Add the expected short context beside it.
-3. Keep new parsing code inside `cppcolorlog::detail`.
+3. Keep new parsing code with the other internal parser helpers.
 4. Test ordinary methods, templates, nested template types, constructors,
    destructors, operators, and lambdas when relevant.
 5. Run `make format` and `make test`.
 6. When possible, compile with both GCC and Clang because their strings differ.
 
 Application code should depend only on the logging macros and public classes,
-not on `cppcolorlog::detail`.
+not on internal parser helpers.
