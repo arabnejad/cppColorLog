@@ -1,8 +1,10 @@
 #ifndef CPPCOLORLOGGER_LOGGER_H
 #define CPPCOLORLOGGER_LOGGER_H
 
+#include <atomic>
 #include <array>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <ctime>
 #include <fstream>
@@ -14,7 +16,6 @@
 #include <set>
 #include <sstream>
 #include <string>
-#include <thread>
 #include <utility>
 #include <vector>
 
@@ -892,6 +893,8 @@ struct LoggerState {
 class ScopedSettings;
 
 class Logger {
+  typedef std::uint64_t ThreadToken;
+
   struct OutputSettings {
     OutputSettings() : color(Color::WHITE), colorMode(ColorMode::AUTOMATIC) {}
 
@@ -918,13 +921,13 @@ public:
 
   void setLogLevel(LOGLEVEL level) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).logLevel = level;
+    activeStateLocked(getCurrentThreadToken()).logLevel = level;
   }
 
   void setLevelColor(LOGLEVEL level, const std::string &color) {
     const std::size_t           index = levelIndex(level);
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    LoggerState                &state = activeStateLocked(getCurrentThreadToken());
     if (index < state.colors.size())
       state.colors[index] = color;
   }
@@ -933,13 +936,13 @@ public:
   // settings. This choice overrides terminal detection and NO_COLOR.
   void setColorEnabled(bool enabled) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).colorMode = enabled ? ColorMode::ENABLED : ColorMode::DISABLED;
+    activeStateLocked(getCurrentThreadToken()).colorMode = enabled ? ColorMode::ENABLED : ColorMode::DISABLED;
   }
 
   // Return to automatic terminal detection and NO_COLOR handling.
   void useAutomaticColor() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).colorMode = ColorMode::AUTOMATIC;
+    activeStateLocked(getCurrentThreadToken()).colorMode = ColorMode::AUTOMATIC;
   }
 
   /**
@@ -951,7 +954,7 @@ public:
     if (!newFormatter)
       return;
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).formatter = newFormatter;
+    activeStateLocked(getCurrentThreadToken()).formatter = newFormatter;
   }
 
   /** Restores the standard timestamp and line layout. */
@@ -969,7 +972,7 @@ public:
     if (!sink)
       return SinkHandle();
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    return addSinkLocked(activeStateLocked(std::this_thread::get_id()), sink);
+    return addSinkLocked(activeStateLocked(getCurrentThreadToken()), sink);
   }
 
   /**
@@ -999,7 +1002,7 @@ public:
       return false;
 
     std::lock_guard<std::mutex>                               state_lck(m_state_mux);
-    LoggerState                                              &state = activeStateLocked(std::this_thread::get_id());
+    LoggerState                                              &state = activeStateLocked(getCurrentThreadToken());
     std::map<std::size_t, std::shared_ptr<LogSink>>::iterator sink  = state.sinks.find(handle.m_id);
     if (sink == state.sinks.end())
       return false;
@@ -1019,7 +1022,7 @@ public:
    */
   void clearSinks() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    LoggerState                &state = activeStateLocked(getCurrentThreadToken());
     state.sinks.clear();
     state.inMemorySink.reset();
   }
@@ -1033,7 +1036,7 @@ public:
 
   std::shared_ptr<InMemorySink> enableInMemorySink() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    LoggerState                &state = activeStateLocked(std::this_thread::get_id());
+    LoggerState                &state = activeStateLocked(getCurrentThreadToken());
     if (!state.inMemorySink) {
       state.inMemorySink = std::make_shared<InMemorySink>();
       addSinkLocked(state, state.inMemorySink);
@@ -1045,7 +1048,7 @@ public:
     std::shared_ptr<InMemorySink> sink;
     {
       std::lock_guard<std::mutex> state_lck(m_state_mux);
-      sink = activeStateLocked(std::this_thread::get_id()).inMemorySink;
+      sink = activeStateLocked(getCurrentThreadToken()).inMemorySink;
     }
     return sink ? sink->getLogs() : std::vector<std::string>();
   }
@@ -1060,7 +1063,7 @@ public:
     std::vector<std::shared_ptr<LogSink>> sinks;
     {
       std::lock_guard<std::mutex> state_lck(m_state_mux);
-      copySinksLocked(activeStateLocked(std::this_thread::get_id()), sinks);
+      copySinksLocked(activeStateLocked(getCurrentThreadToken()), sinks);
     }
 
     bool                                  succeeded = true;
@@ -1074,12 +1077,12 @@ public:
 
   void setFilterLevels(std::initializer_list<LOGLEVEL> levels) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).filterLevels = std::set<LOGLEVEL>(levels.begin(), levels.end());
+    activeStateLocked(getCurrentThreadToken()).filterLevels = std::set<LOGLEVEL>(levels.begin(), levels.end());
   }
 
   void clearFilterLevels() {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    activeStateLocked(std::this_thread::get_id()).filterLevels.clear();
+    activeStateLocked(getCurrentThreadToken()).filterLevels.clear();
   }
 
   ScopedSettings scopedSettings();
@@ -1096,7 +1099,7 @@ public:
    */
   bool isEnabled(LOGLEVEL level) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    return acceptsLevel(activeStateLocked(std::this_thread::get_id()), level);
+    return acceptsLevel(activeStateLocked(getCurrentThreadToken()), level);
   }
 
   template <typename T>
@@ -1155,15 +1158,25 @@ private:
     return static_cast<std::size_t>(level);
   }
 
+  // Assign each thread a process-wide token the first time it uses a logger.
+  // Unlike std::thread::id, this value is never recycled after a thread exits.
+  static ThreadToken getCurrentThreadToken() {
+    static std::atomic<ThreadToken>       nextThreadToken(1);
+    static thread_local const ThreadToken threadToken = nextThreadToken.fetch_add(1, std::memory_order_relaxed);
+    if (threadToken == 0)
+      std::abort();
+    return threadToken;
+  }
+
   // The caller must hold m_state_mux. Setters and logging use the current
   // thread's top override when present, otherwise they use the global state.
-  LoggerState &activeStateLocked(const std::thread::id &threadId) {
-    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadId);
+  LoggerState &activeStateLocked(ThreadToken threadToken) {
+    std::map<ThreadToken, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadToken);
     return stack == m_scopedStateStacks.end() || stack->second.empty() ? m_globalState : stack->second.back();
   }
 
-  const LoggerState &activeStateLocked(const std::thread::id &threadId) const {
-    std::map<std::thread::id, std::vector<LoggerState>>::const_iterator stack = m_scopedStateStacks.find(threadId);
+  const LoggerState &activeStateLocked(ThreadToken threadToken) const {
+    std::map<ThreadToken, std::vector<LoggerState>>::const_iterator stack = m_scopedStateStacks.find(threadToken);
     return stack == m_scopedStateStacks.end() || stack->second.empty() ? m_globalState : stack->second.back();
   }
 
@@ -1172,15 +1185,15 @@ private:
     return level <= state.logLevel && (state.filterLevels.empty() || state.filterLevels.count(level) != 0);
   }
 
-  void beginSettingsOverride(const std::thread::id &threadId) {
+  void beginSettingsOverride(ThreadToken threadToken) {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    std::vector<LoggerState>   &stack = m_scopedStateStacks[threadId];
+    std::vector<LoggerState>   &stack = m_scopedStateStacks[threadToken];
     stack.push_back(stack.empty() ? m_globalState : stack.back());
   }
 
-  void endSettingsOverride(const std::thread::id &threadId) {
-    std::lock_guard<std::mutex>                                   state_lck(m_state_mux);
-    std::map<std::thread::id, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadId);
+  void endSettingsOverride(ThreadToken threadToken) {
+    std::lock_guard<std::mutex>                               state_lck(m_state_mux);
+    std::map<ThreadToken, std::vector<LoggerState>>::iterator stack = m_scopedStateStacks.find(threadToken);
     if (stack == m_scopedStateStacks.end() || stack->second.empty())
       return;
 
@@ -1193,7 +1206,7 @@ private:
   // holding the state lock. Formatting and output happen after releasing it.
   bool tryCaptureOutputSettings(LOGLEVEL level, OutputSettings &outputSettings) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    const LoggerState          &state = activeStateLocked(std::this_thread::get_id());
+    const LoggerState          &state = activeStateLocked(getCurrentThreadToken());
     if (!acceptsLevel(state, level))
       return false;
 
@@ -1233,24 +1246,23 @@ private:
   std::size_t          m_nextSinkId;
   SinkHandle           m_defaultConsoleSinkHandle;
 
-  // Each thread owns an independent nested override stack. The map is stored
-  // on the logger so a moved ScopedSettings guard can still remove the stack
-  // created by its original thread.
-  std::map<std::thread::id, std::vector<LoggerState>> m_scopedStateStacks;
+  // Unique tokens keep stacks separate even when the operating system reuses a
+  // thread ID. A moved guard keeps its creating thread's token for cleanup.
+  std::map<ThreadToken, std::vector<LoggerState>> m_scopedStateStacks;
 };
 
 class ScopedSettings {
 public:
-  explicit ScopedSettings(Logger &logger) : m_logger(&logger), m_ownerThread(std::this_thread::get_id()) {
-    m_logger->beginSettingsOverride(m_ownerThread);
+  explicit ScopedSettings(Logger &logger) : m_logger(&logger), m_ownerThreadToken(Logger::getCurrentThreadToken()) {
+    m_logger->beginSettingsOverride(m_ownerThreadToken);
   }
 
   ~ScopedSettings() {
     if (m_logger)
-      m_logger->endSettingsOverride(m_ownerThread);
+      m_logger->endSettingsOverride(m_ownerThreadToken);
   }
 
-  ScopedSettings(ScopedSettings &&other) : m_logger(other.m_logger), m_ownerThread(other.m_ownerThread) {
+  ScopedSettings(ScopedSettings &&other) : m_logger(other.m_logger), m_ownerThreadToken(other.m_ownerThreadToken) {
     other.m_logger = nullptr;
   }
 
@@ -1260,9 +1272,9 @@ public:
 
 private:
   Logger *m_logger;
-  // Remember the creating thread so destruction restores that same stack even
-  // if this movable guard is transferred before it is destroyed.
-  std::thread::id m_ownerThread;
+  // Keep the creating thread's unique token so a moved guard restores the
+  // correct stack even after that thread exits.
+  Logger::ThreadToken m_ownerThreadToken;
 };
 
 inline ScopedSettings Logger::scopedSettings() {

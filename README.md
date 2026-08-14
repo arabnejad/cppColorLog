@@ -595,14 +595,15 @@ The configuration rules are:
 - A global change made by another thread is visible after the local scope ends,
   but it does not replace the local scope's existing snapshot.
 
-Internally, the logger calls `std::this_thread::get_id()` to identify the
-calling thread. That thread ID is used as the key for selecting its temporary
-settings stack. In simplified form, the lookup works like this:
+Internally, the logger assigns each thread a unique numeric token the first time
+that thread uses a logger. Unlike `std::thread::id`, this token is not reused
+after the thread exits. The token selects the thread's temporary settings stack.
+In simplified form, the lookup works like this:
 
 ```cpp
 LoggerState &activeStateForCurrentThread() {
-  const std::thread::id threadId = std::this_thread::get_id();
-  const auto stack = m_scopedStateStacks.find(threadId);
+  const ThreadToken threadToken = getCurrentThreadToken();
+  const auto stack = m_scopedStateStacks.find(threadToken);
 
   if (stack == m_scopedStateStacks.end() || stack->second.empty())
     return m_globalState;
@@ -611,9 +612,12 @@ LoggerState &activeStateForCurrentThread() {
 }
 ```
 
-The thread ID provides separation between threads; it does not provide
-synchronization. A mutex protects the shared map while stacks are read, added,
-updated, or removed.
+`ScopedSettings` remembers its creating thread's token. If the scope is moved to
+another thread, its destructor still removes the correct settings stack. A new
+thread always receives a different token, so it cannot accidentally inherit a
+stack left alive by an older thread. The token provides identity, not
+synchronization; a mutex still protects the shared map while stacks are read,
+added, updated, or removed.
 
 Consequently, temporary settings can safely overlap:
 

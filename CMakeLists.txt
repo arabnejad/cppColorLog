@@ -79,8 +79,7 @@ if(BUILD_TESTS)
 
     enable_testing()
     add_executable(logger_tests
-        tests/multitu_a.cpp
-        tests/multitu_b.cpp
+        tests/logger_from_another_translation_unit.cpp
         tests/test_logger.cpp
     )
     target_link_libraries(logger_tests PRIVATE

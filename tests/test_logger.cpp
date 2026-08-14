@@ -13,8 +13,8 @@
 #include <utility>
 #include <vector>
 
-int multiTranslationUnitA();
-int multiTranslationUnitB();
+bool colorsAreAvailableFromAnotherTranslationUnit();
+bool infoIsEnabledFromAnotherTranslationUnit();
 
 // These names and messages intentionally match the quick-start documentation.
 // Keeping them outside the anonymous namespace makes the expected context
@@ -1007,6 +1007,36 @@ TEST(LoggerDesignTest, MovedScopedSettingsRestoresItsCreatingThread) {
   EXPECT_NE(logs[0].find("Creating thread restored"), std::string::npos);
 }
 
+TEST(LoggerDesignTest, ScopedSettingsOutlivingAThreadCannotAffectNewThreads) {
+  Logger logger(false);
+  logger.setLogLevel(LOGLEVEL::INFO);
+
+  const int threadCount = 100;
+  for (int index = 0; index < threadCount; ++index) {
+    std::unique_ptr<ScopedSettings> retainedSettings;
+    std::thread                     creator([&logger, &retainedSettings]() {
+      retainedSettings.reset(new ScopedSettings(logger));
+      logger.setLogLevel(LOGLEVEL::ERROR);
+    });
+    creator.join();
+
+    bool        replacementUsesGlobalSettings = false;
+    std::thread replacement([&logger, &replacementUsesGlobalSettings]() {
+      replacementUsesGlobalSettings = logger.isEnabled(LOGLEVEL::INFO);
+    });
+    replacement.join();
+
+    EXPECT_TRUE(replacementUsesGlobalSettings) << "New thread used retained settings at iteration " << index;
+    retainedSettings.reset();
+  }
+}
+
+TEST_F(LoggerTest, ScopedSettingsUseTheSameThreadTokenAcrossTranslationUnits) {
+  LOGGER.setLogLevel(LOGLEVEL::ERROR);
+
+  EXPECT_FALSE(infoIsEnabledFromAnotherTranslationUnit());
+}
+
 TEST(LoggerDesignTest, AlwaysAndVerboseThresholdSemanticsArePreserved) {
   Logger                              logger(false);
   const std::shared_ptr<InMemorySink> sink = logger.enableInMemorySink();
@@ -1246,8 +1276,7 @@ TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
 }
 
 TEST(LoggerDesignTest, HeaderLinksAcrossTranslationUnits) {
-  EXPECT_EQ(multiTranslationUnitA(), 1);
-  EXPECT_EQ(multiTranslationUnitB(), 1);
+  EXPECT_TRUE(colorsAreAvailableFromAnotherTranslationUnit());
 }
 
 } // namespace
