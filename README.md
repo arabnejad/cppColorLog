@@ -25,7 +25,7 @@ The repository `Makefile` wraps the CMake commands:
 
 | Action | Command |
 |---|---|
-| Configure and build everything | `make` |
+| Configure and build the library | `make` |
 | Configure only | `make configure` |
 | Build examples | `make examples` |
 | Build and run examples | `make run-examples` |
@@ -46,10 +46,20 @@ make test BUILD_DIR=build-release BUILD_TYPE=Release
 Direct CMake commands remain available:
 
 ```bash
-cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
+cmake -S . -B build \
+  -DCPPCOLORLOGGER_BUILD_TESTS=ON \
+  -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
 cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --build build --target run_tests
 ```
+
+An ordinary `make` or CMake configuration builds only the header-only library.
+Tests and examples are enabled only when explicitly requested, so a normal
+build does not download GoogleTest. When tests are enabled, CMake uses an
+installed GoogleTest package when available and downloads it only as a
+fallback.
+
+The minimum supported CMake version is 3.14.
 
 ## Basic usage
 
@@ -741,6 +751,24 @@ Messages can be strings or any value supported by `operator<<`.
 ```cmake
 add_subdirectory(path/to/CppColorLogger)
 target_link_libraries(your_target PRIVATE CppColorLogger::cppColorLogger)
+```
+
+Tests and examples are disabled by default, including when the library is added
+to a parent project. They can be enabled independently when working on the
+logger itself:
+
+```bash
+cmake -S . -B build-tests -DCPPCOLORLOGGER_BUILD_TESTS=ON
+cmake -S . -B build-examples -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
+```
+
+`BUILD_TESTING=OFF` is also respected as CMake's standard project-wide switch.
+For example, tests remain disabled when both of these options are supplied:
+
+```bash
+cmake -S . -B build \
+  -DCPPCOLORLOGGER_BUILD_TESTS=ON \
+  -DBUILD_TESTING=OFF
 ```
 
 Then include:

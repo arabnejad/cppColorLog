@@ -10,18 +10,34 @@ JOBS ?= 2
 all: build
 
 configure:
-	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=$(BUILD_TYPE) -DBUILD_EXAMPLES=ON -DBUILD_TESTS=ON
+	$(CMAKE) -S . -B $(BUILD_DIR) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCPPCOLORLOGGER_BUILD_EXAMPLES=OFF \
+		-DCPPCOLORLOGGER_BUILD_TESTS=OFF
 
 build: configure
 	$(CMAKE) --build $(BUILD_DIR) --parallel $(JOBS)
 
-examples: configure
+examples:
+	$(CMAKE) -S . -B $(BUILD_DIR) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCPPCOLORLOGGER_BUILD_EXAMPLES=ON \
+		-DCPPCOLORLOGGER_BUILD_TESTS=OFF
 	$(CMAKE) --build $(BUILD_DIR) --target examples --parallel $(JOBS)
 
-run-examples: configure
+run-examples:
+	$(CMAKE) -S . -B $(BUILD_DIR) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCPPCOLORLOGGER_BUILD_EXAMPLES=ON \
+		-DCPPCOLORLOGGER_BUILD_TESTS=OFF
 	$(CMAKE) --build $(BUILD_DIR) --target run_all_samples --parallel $(JOBS)
 
-tests: configure
+tests:
+	$(CMAKE) -S . -B $(BUILD_DIR) \
+		-DCMAKE_BUILD_TYPE=$(BUILD_TYPE) \
+		-DCPPCOLORLOGGER_BUILD_EXAMPLES=OFF \
+		-DCPPCOLORLOGGER_BUILD_TESTS=ON \
+		-DBUILD_TESTING=ON
 	$(CMAKE) --build $(BUILD_DIR) --target logger_tests --parallel $(JOBS)
 
 test: tests
@@ -33,7 +49,7 @@ format: configure
 	$(CMAKE) --build $(BUILD_DIR) --target clang_format
 
 install: build
-	$(CMAKE) --install $(BUILD_DIR)
+	$(CMAKE) --build $(BUILD_DIR) --target install
 
 clean:
 	@found_build=false; \
@@ -55,7 +71,7 @@ clean:
 	fi
 
 help:
-	@$(CMAKE) -E echo "make                 Configure and build everything"
+	@$(CMAKE) -E echo "make                 Configure and build the library"
 	@$(CMAKE) -E echo "make configure       Configure the CMake build"
 	@$(CMAKE) -E echo "make examples        Build all examples"
 	@$(CMAKE) -E echo "make run-examples    Build and run all examples"

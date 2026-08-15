@@ -52,7 +52,7 @@ jobs:
           cmake-version: '3.28.0'
 
       - name: Configure project
-        run: cmake -S . -B build -DBUILD_TESTS=ON -DBUILD_EXAMPLES=ON
+        run: cmake -S . -B build -DCPPCOLORLOGGER_BUILD_TESTS=ON -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
 
       - name: Build project
         run: cmake --build build --config Release

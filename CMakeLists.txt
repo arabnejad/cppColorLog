@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.14)
 project(CppColorLogger VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
@@ -16,10 +16,10 @@ target_include_directories(cppColorLogger INTERFACE
 find_package(Threads REQUIRED)
 target_link_libraries(cppColorLogger INTERFACE Threads::Threads)
 
-option(BUILD_EXAMPLES "Build examples" ${PROJECT_IS_TOP_LEVEL})
-option(BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
+option(CPPCOLORLOGGER_BUILD_EXAMPLES "Build cppColorLogger examples" OFF)
+option(CPPCOLORLOGGER_BUILD_TESTS "Build cppColorLogger unit tests" OFF)
 
-if(BUILD_EXAMPLES)
+if(CPPCOLORLOGGER_BUILD_EXAMPLES)
     file(GLOB_RECURSE EXAMPLE_SOURCES CONFIGURE_DEPENDS
         RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
         examples/*/*.cpp
@@ -66,18 +66,32 @@ else()
     )
 endif()
 
-if(BUILD_TESTS)
-    include(FetchContent)
-    FetchContent_Declare(
-        googletest
-        URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+if(CPPCOLORLOGGER_BUILD_TESTS)
+    include(CTest)
+endif()
 
-    enable_testing()
+if(CPPCOLORLOGGER_BUILD_TESTS AND BUILD_TESTING)
+    if(NOT TARGET GTest::gtest_main)
+        find_package(GTest CONFIG QUIET)
+    endif()
+
+    if(NOT TARGET GTest::gtest_main)
+        include(FetchContent)
+
+        if(POLICY CMP0135)
+            cmake_policy(SET CMP0135 NEW)
+        endif()
+
+        FetchContent_Declare(
+            googletest
+            URL https://github.com/google/googletest/archive/refs/tags/v1.14.0.zip
+        )
+        set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+
+        FetchContent_MakeAvailable(googletest)
+    endif()
+
     add_executable(logger_tests
         tests/logger_from_another_translation_unit.cpp
         tests/test_logger.cpp
