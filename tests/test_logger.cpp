@@ -294,14 +294,49 @@ TEST_F(LoggerTest, FileSinkTruncateModeClearsExistingContent) {
   EXPECT_NE(content.find("Replacement content"), std::string::npos);
 }
 
-TEST_F(LoggerTest, LoggerFlushWritesAllActiveFileSinks) {
+TEST_F(LoggerTest, DefaultFileFlushModeMakesAnEntryImmediatelyReadable) {
+  FileSink sink(logFile, FileOpenMode::TRUNCATE);
+  ASSERT_TRUE(sink.isOpen());
+
+  sink.write(makeFormattedEntry("Immediately flushed"));
+
+  EXPECT_EQ(readFile(), "Immediately flushed\n");
+  EXPECT_FALSE(sink.hasError());
+}
+
+TEST_F(LoggerTest, ManualFileFlushModePreservesCompleteEntries) {
+  Logger                          logger(false);
+  const std::shared_ptr<FileSink> sink = logger.addFileSink(logFile, FileOpenMode::TRUNCATE, FileFlushMode::MANUAL);
+  ASSERT_TRUE(sink->isOpen());
+
+  logger.log(LOGLEVEL::INFO, "First buffered entry", "manualFlushTest");
+  logger.log(LOGLEVEL::INFO, "Second buffered entry", "manualFlushTest");
+  ASSERT_TRUE(logger.flushAllSinks());
+
+  const std::string content = readFile();
+  EXPECT_NE(content.find("First buffered entry\n"), std::string::npos);
+  EXPECT_NE(content.find("Second buffered entry\n"), std::string::npos);
+  EXPECT_FALSE(sink->hasError());
+}
+
+TEST_F(LoggerTest, ClosingManualFileSinkWritesBufferedEntries) {
+  {
+    FileSink sink(logFile, FileOpenMode::TRUNCATE, FileFlushMode::MANUAL);
+    ASSERT_TRUE(sink.isOpen());
+    sink.write(makeFormattedEntry("Flushed when closed"));
+  }
+
+  EXPECT_EQ(readFile(), "Flushed when closed\n");
+}
+
+TEST_F(LoggerTest, FlushAllSinksWritesAllActiveFileSinks) {
   Logger                          logger(false);
   const std::shared_ptr<FileSink> sink = logger.addFileSink(logFile, FileOpenMode::TRUNCATE);
   ASSERT_TRUE(sink->isOpen());
 
   logger.log(LOGLEVEL::INFO, "Flushed through logger", "flushTest");
 
-  EXPECT_TRUE(logger.flush());
+  EXPECT_TRUE(logger.flushAllSinks());
   EXPECT_FALSE(sink->hasError());
   EXPECT_NE(readFile().find("Flushed through logger"), std::string::npos);
 }
@@ -331,7 +366,7 @@ TEST(FileSinkFailureTest, ReportsFailureWhenFileStopsAcceptingWrites) {
 
   EXPECT_TRUE(sink->hasError());
   EXPECT_NE(sink->getLastError().find("Failed to write"), std::string::npos);
-  EXPECT_FALSE(logger.flush());
+  EXPECT_FALSE(logger.flushAllSinks());
 }
 #endif
 

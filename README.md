@@ -235,17 +235,17 @@ step-by-step examples. The complete runnable example is
 ## File and memory sinks
 
 ```cpp
-std::shared_ptr<FileSink> file =
+std::shared_ptr<FileSink> logger_file_sink =
     LOGGER.addFileSink("application.log", FileOpenMode::APPEND);
 
-if (!file->isOpen())
-  std::cerr << file->getLastError() << '\n';
+if (!logger_file_sink->isOpen())
+  std::cerr << logger_file_sink->getLastError() << '\n';
 
 std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
 LOGGER_LOG(LOGLEVEL::INFO, "Stored by every active sink");
 
-if (!LOGGER.flush())
-  std::cerr << file->getLastError() << '\n';
+if (!LOGGER.flushAllSinks())
+  std::cerr << logger_file_sink->getLastError() << '\n';
 
 for (const std::string &entry : memory->getLogs())
   std::cout << entry << '\n';
@@ -267,10 +267,72 @@ LOGGER.addFileSink("latest.log", FileOpenMode::TRUNCATE);
 
 ### Flushing and detecting file errors
 
-`FileSink::flush()` flushes one file sink. `Logger::flush()` flushes every active
-sink and returns `true` only when every sink succeeds. File entries are flushed
-after each write; the explicit methods provide a clear point where an
-application can check the result.
+#### Default behavior
+
+The default behavior is `FileFlushMode::AFTER_EACH_ENTRY`. Every log entry is
+flushed automatically, so the application does not need to call `flush()`:
+
+```cpp
+LOGGER.addFileSink("application.log");
+
+LOGGER_LOG(LOGLEVEL::INFO, "First message");
+// The file has already been flushed.
+```
+
+The call above is equivalent to writing:
+
+```cpp
+LOGGER.addFileSink(
+    "application.log",
+    FileOpenMode::APPEND,
+    FileFlushMode::AFTER_EACH_ENTRY);
+```
+
+Flushing every entry reduces the amount of recent logging that could be lost if
+the application stops unexpectedly.
+
+#### Manual flushing
+
+`FileFlushMode::MANUAL` does not automatically flush after each entry. Keep the
+returned `FileSink` and call `flush()` when the buffered entries must be written:
+
+```cpp
+std::shared_ptr<FileSink> logger_file_sink = LOGGER.addFileSink(
+    "application.log",
+    FileOpenMode::APPEND,
+    FileFlushMode::MANUAL);
+
+LOGGER_LOG(LOGLEVEL::INFO, "First message");
+LOGGER_LOG(LOGLEVEL::INFO, "Second message");
+
+// Flush only this file sink.
+if (!logger_file_sink->flush()) {
+  std::cerr << logger_file_sink->getLastError() << '\n';
+}
+```
+
+To flush every active sink instead of one specific file, use:
+
+```cpp
+if (!LOGGER.flushAllSinks()) {
+  std::cerr << "A log sink could not be flushed\n";
+}
+```
+
+In summary:
+
+- `AFTER_EACH_ENTRY` flushes automatically after every message and is the
+  default.
+- `MANUAL` requires `logger_file_sink->flush()` for one file or
+  `LOGGER.flushAllSinks()` for all active sinks.
+- Closing a file normally writes its remaining buffered data, but an explicit
+  flush is needed to check whether flushing succeeded.
+
+Manual mode can improve throughput when many messages are written. Its tradeoff
+is that recent buffered entries may be lost if the application crashes before
+they are flushed. `FileOpenMode` and `FileFlushMode` are independent: the first
+controls whether existing file content is kept, while the second controls when
+new entries are flushed.
 
 File errors are never silently cleared:
 
@@ -338,8 +400,9 @@ inspect their status or stored entries. When an individual removal handle is
 needed, construct the sink and pass it to `addSink()` directly:
 
 ```cpp
-std::shared_ptr<FileSink> file = std::make_shared<FileSink>("application.log");
-SinkHandle fileHandle = LOGGER.addSink(file);
+std::shared_ptr<FileSink> logger_file_sink =
+    std::make_shared<FileSink>("application.log");
+SinkHandle fileHandle = LOGGER.addSink(logger_file_sink);
 ```
 
 Sink changes follow the same rules as other scoped settings. Removing or clearing

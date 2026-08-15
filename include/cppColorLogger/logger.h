@@ -73,6 +73,10 @@ enum class ColorMode { AUTOMATIC, ENABLED, DISABLED };
 // sink opens it.
 enum class FileOpenMode { APPEND, TRUNCATE };
 
+// AFTER_EACH_ENTRY immediately flushes every log entry. MANUAL leaves flushing
+// to FileSink::flush(), Logger::flushAllSinks(), or normal stream closure.
+enum class FileFlushMode { AFTER_EACH_ENTRY, MANUAL };
+
 // A vector keeps fields in the order supplied by the caller. Using strings for
 // both parts keeps the C++11 API small and predictable.
 using LogFields = std::vector<std::pair<std::string, std::string>>;
@@ -797,10 +801,12 @@ private:
  */
 class FileSink : public LogSink {
 public:
-  explicit FileSink(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) : m_filename(filename) {
-    const std::ios::openmode openMode =
-        std::ios::out | (mode == FileOpenMode::APPEND ? std::ios::app : std::ios::trunc);
-    m_file.open(filename.c_str(), openMode);
+  explicit FileSink(const std::string &filename, FileOpenMode openMode = FileOpenMode::APPEND,
+                    FileFlushMode flushMode = FileFlushMode::AFTER_EACH_ENTRY)
+      : m_filename(filename), m_flushMode(flushMode) {
+    const std::ios::openmode fileOpenMode =
+        std::ios::out | (openMode == FileOpenMode::APPEND ? std::ios::app : std::ios::trunc);
+    m_file.open(filename.c_str(), fileOpenMode);
     if (!m_file.is_open())
       m_lastError = "Failed to open log file '" + m_filename + "'.";
   }
@@ -810,7 +816,9 @@ public:
     if (!m_lastError.empty())
       return;
 
-    m_file << entry.text << std::endl;
+    m_file << entry.text << '\n';
+    if (m_flushMode == FileFlushMode::AFTER_EACH_ENTRY)
+      m_file.flush();
     if (!m_file)
       m_lastError = "Failed to write to log file '" + m_filename + "'.";
   }
@@ -850,6 +858,7 @@ private:
   mutable std::mutex m_file_mux;
   std::ofstream      m_file;
   std::string        m_filename;
+  FileFlushMode      m_flushMode;
   std::string        m_lastError;
 };
 
@@ -1027,9 +1036,10 @@ public:
     state.inMemorySink.reset();
   }
 
-  /** Adds a file sink in append mode by default and returns it for status checks. */
-  std::shared_ptr<FileSink> addFileSink(const std::string &filename, FileOpenMode mode = FileOpenMode::APPEND) {
-    const std::shared_ptr<FileSink> sink = std::make_shared<FileSink>(filename, mode);
+  /** Adds a file sink and returns it for status checks and explicit flushing. */
+  std::shared_ptr<FileSink> addFileSink(const std::string &filename, FileOpenMode openMode = FileOpenMode::APPEND,
+                                        FileFlushMode flushMode = FileFlushMode::AFTER_EACH_ENTRY) {
+    const std::shared_ptr<FileSink> sink = std::make_shared<FileSink>(filename, openMode, flushMode);
     addSink(sink);
     return sink;
   }
@@ -1059,7 +1069,7 @@ public:
    * The sink list is copied before flushing, so concurrent sink removal is safe.
    * A sink removed after the copy may receive this final flush.
    */
-  bool flush() {
+  bool flushAllSinks() {
     std::vector<std::shared_ptr<LogSink>> sinks;
     {
       std::lock_guard<std::mutex> state_lck(m_state_mux);
@@ -1290,6 +1300,7 @@ inline Logger &defaultLogger() {
 // Short global names keep the public API easy to use without a namespace prefix.
 using ColorMode           = cppcolorlog::ColorMode;
 using FileOpenMode        = cppcolorlog::FileOpenMode;
+using FileFlushMode       = cppcolorlog::FileFlushMode;
 using LogFields           = cppcolorlog::LogFields;
 using LogEntry            = cppcolorlog::LogEntry;
 using LogFormatter        = cppcolorlog::LogFormatter;
