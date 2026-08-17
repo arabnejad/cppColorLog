@@ -12,18 +12,18 @@ code, use `LOGGER_LOG`:
 #include "cppColorLogger/logger.h"
 
 void refreshCache() {
-  LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed");
+  LOGGER_LOG(LogLevel::Info, "Cache refreshed");
 }
 
 class Service {
 public:
   void start() {
-    LOGGER_LOG(LOGLEVEL::INFO, "Service started");
+    LOGGER_LOG(LogLevel::Info, "Service started");
   }
 };
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   refreshCache();
 
   Service service;
@@ -38,8 +38,8 @@ The logger automatically adds a **source context** to each message:
 [2026-09-05 00:59:52] [INFO] [Service::start] Service started
 ```
 
-This exact program is also available as the separately compiled
-[`examples/16_source_context_quick_start/16_source_context_quick_start.cpp`](../examples/16_source_context_quick_start/16_source_context_quick_start.cpp).
+The complete runnable source-context demonstration is
+[`examples/04_source_context/source_context.cpp`](../examples/04_source_context/source_context.cpp).
 
 Follow these three rules:
 
@@ -51,18 +51,19 @@ Follow these three rules:
    private implementation helpers used by the logging macros.
 
 If that is all you need, you can stop reading here. The remaining sections
-explain the implementation in `logger.h`.
+explain the parser implementation inside the single
+`include/cppColorLogger/logger.h` header.
 
 ## Runnable examples for all supported cases
 
 The project includes
-[`examples/15_source_context/15_source_context.cpp`](../examples/15_source_context/15_source_context.cpp).
+[`examples/04_source_context/source_context.cpp`](../examples/04_source_context/source_context.cpp).
 It uses the real public macros rather than calling the parser directly. Build
 and run it from the project root:
 
 ```sh
 make examples
-./build/15_source_context
+./build/source_context
 ```
 
 The following output was produced by GCC 13.3. The timestamp changes on every
@@ -70,7 +71,7 @@ run. A terminal may display these INFO lines in green; invisible ANSI color
 codes are not shown below.
 
 ```text
-Example 15: Automatic and explicit source contexts.
+Source context: automatic and explicit names.
 [2026-09-05 01:10:14] [INFO] [refreshCache] Free function
 [2026-09-05 01:10:14] [INFO] [Service::Service] Constructor
 [2026-09-05 01:10:14] [INFO] [Service::start] Member function
@@ -123,7 +124,7 @@ Consider this method:
 
 ```cpp
 void Service::start() {
-  LOGGER_LOG(LOGLEVEL::INFO, "Service started");
+  LOGGER_LOG(LogLevel::Info, "Service started");
 }
 ```
 
@@ -134,7 +135,7 @@ LOGGER_LOG
     |
     | passes the detailed compiler signature and __func__ fallback
     v
-detail::normalizeFunctionSignature
+cppcolorlogger_detail::normalizeFunctionSignature
     |
     | removes information that is not useful in the log
     v
@@ -287,11 +288,11 @@ For a free function template:
 
 template <typename T>
 void process(const T &) {
-  LOGGER_LOG(LOGLEVEL::INFO, "Function template");
+  LOGGER_LOG(LogLevel::Info, "Function template");
 }
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   process(42); // T is int
 }
 ```
@@ -321,14 +322,14 @@ template <typename T>
 class Repository {
 public:
   void save(const T &) {
-    LOGGER_LOG(LOGLEVEL::INFO, "Class template");
+    LOGGER_LOG(LogLevel::Info, "Class template");
   }
 };
 
 struct User {};
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   Repository<User> users;
   users.save(User());
 }
@@ -380,14 +381,14 @@ class Repository {
 public:
   template <typename U>
   void convert(const U &) {
-    LOGGER_LOG(LOGLEVEL::INFO, "Class and member templates");
+    LOGGER_LOG(LogLevel::Info, "Class and member templates");
   }
 };
 
 struct User {};
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   Repository<User> repository;
   repository.convert(std::make_pair(1, 2.0));
 }
@@ -456,9 +457,9 @@ not part of its function signature:
 #include "cppColorLogger/logger.h"
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   const auto refreshCache = []() {
-    LOGGER_LOG(LOGLEVEL::INFO, "Cache refreshed");
+    LOGGER_LOG(LogLevel::Info, "Cache refreshed");
   };
   refreshCache();
 }
@@ -471,10 +472,10 @@ it explicitly:
 #include "cppColorLogger/logger.h"
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   const auto refreshCache = []() {
     LOGGER_LOG_WITH_CONTEXT(
-        LOGLEVEL::INFO,
+        LogLevel::Info,
         "refreshCache",
         "Cache refreshed");
   };
@@ -499,13 +500,13 @@ explicit context when you do not want them in the log:
 
 void saveUser() {
   LOGGER_LOG_WITH_CONTEXT(
-      LOGLEVEL::INFO,
+      LogLevel::Info,
       "UserRepository::save",
       "Saving user");
 }
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::INFO);
+  LOGGER.setLogLevel(LogLevel::Info);
   saveUser();
 }
 ```
@@ -533,13 +534,15 @@ For example, the portable fallback and explicit versions would look like:
 The first line is the possible `__func__` fallback. The second line uses
 `LOGGER_LOG_WITH_CONTEXT` and is therefore stable on every compiler.
 
-## Suggested order for reading `logger.h`
+## Suggested order for reading the source
 
 If this is your first time reading the header, use this order:
 
-1. Read the `LOGGER_LOG` and `LOGGER_LOG_WITH_CONTEXT` macros at the bottom.
-2. Read `normalizeFunctionSignature` to see the four high-level steps.
-3. Read `removeTemplateSuffix` and `extractFunctionName`.
+1. Read the `LOGGER_LOG` and `LOGGER_LOG_WITH_CONTEXT` macros at the bottom of
+   `logger.h`.
+2. In the same header, read `normalizeFunctionSignature` to see the four
+   high-level steps.
+3. Read `removeTemplateSuffix` and `extractFunctionName` next.
 4. Read the smaller helpers only when you need to understand a specific edge
    case.
 5. Read `Logger::log()` to see how the returned context enters the log message.

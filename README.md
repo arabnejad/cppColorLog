@@ -7,17 +7,16 @@ multiple sinks, temporary settings, and thread-safe configuration and output.
 
 ## Features
 
-- One header and a CMake interface target
+- One self-contained header and a CMake interface target
 - C++11 and newer
 - Thread-safe settings, output dispatch, file output, and memory snapshots
 - Terminal-aware and customizable console colors
 - Console, file, in-memory, and user-defined sinks
-- Threshold and whitelist filtering
+- A verbosity threshold plus an optional allowed-level list
 - Fast enabled-level checks for guarding expensive messages
 - Structured key/value fields and customizable text formatting
 - Exception-safe scoped settings
 - Unified automatic function and class context on GCC, Clang, and MSVC
-- Portable time formatting
 
 ## Build with Make
 
@@ -29,11 +28,11 @@ The repository `Makefile` wraps the CMake commands:
 | Configure only | `make configure` |
 | Build examples | `make examples` |
 | Build and run examples | `make run-examples` |
-| Build tests | `make tests` |
 | Build and run tests | `make test` |
 | Format source | `make format` |
 | Install | `make install` |
-| Remove this project's `build/` and `build-*` directories | `make clean` |
+| Remove compiled files from `BUILD_DIR` but keep its CMake configuration | `make clean` |
+| Remove this project's complete `build/` and `build-*` directories | `make clean-all` |
 | List commands | `make help` |
 
 Build settings can be overridden, for example:
@@ -43,6 +42,11 @@ make BUILD_TYPE=Release JOBS=8
 make test BUILD_DIR=build-release BUILD_TYPE=Release
 ```
 
+`make clean` runs CMake's clean target for the selected `BUILD_DIR` and keeps
+that directory configured. `make clean-all` removes complete `build/` and
+`build-*` directories belonging to this project. Both commands validate their
+targets, and `make clean BUILD_DIR=.` is rejected.
+
 Direct CMake commands remain available:
 
 ```bash
@@ -50,7 +54,7 @@ cmake -S . -B build \
   -DCPPCOLORLOGGER_BUILD_TESTS=ON \
   -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
 cmake --build build
-cmake --build build --target run_tests
+ctest --test-dir build --output-on-failure
 ```
 
 An ordinary `make` or CMake configuration builds only the header-only library.
@@ -60,6 +64,18 @@ installed GoogleTest package when available and downloads it only as a
 fallback.
 
 The minimum supported CMake version is 3.14.
+Builds must use a separate output directory, such as `build/`; CMake rejects
+in-source builds so generated files cannot overwrite project files.
+
+The examples are grouped by topic instead of repeating one setter per program:
+
+| Example | Demonstrates |
+|---|---|
+| [`basic_logging.cpp`](examples/01_basic_logging/basic_logging.cpp) | Thresholds, levels, and automatic method context |
+| [`settings.cpp`](examples/02_settings/settings.cpp) | Allowed levels, colors, and scoped overrides |
+| [`sinks.cpp`](examples/03_sinks/sinks.cpp) | Console, file, and memory sink lifecycle |
+| [`source_context.cpp`](examples/04_source_context/source_context.cpp) | Functions, classes, templates, operators, and lambdas |
+| [`structured_formatting.cpp`](examples/05_structured_formatting/structured_formatting.cpp) | Structured fields and custom formatting |
 
 ## Basic usage
 
@@ -70,51 +86,85 @@ namespace prefix.
 #include "cppColorLogger/logger.h"
 
 int main() {
-  LOGGER.setLogLevel(LOGLEVEL::DEBUG);
+  LOGGER.setLogLevel(LogLevel::Debug);
 
-  LOGGER_LOG(LOGLEVEL::INFO, "Application started");
-  LOGGER_LOG(LOGLEVEL::DEBUG, "Debug details");
+  LOGGER_LOG(LogLevel::Info, "Application started");
+  LOGGER_LOG(LogLevel::Debug, "Debug details");
 }
 ```
 
+### Why use `LOGGER_LOG` instead of `LOG`?
+
+`LOGGER` is the shared logger object. Use it for configuration and sink
+management:
+
+```cpp
+LOGGER.setLogLevel(LogLevel::Debug);
+LOGGER.addFileSink("application.log");
+```
+
+`LOGGER_LOG` is a macro so it can capture the compiler function signature at the
+exact call site:
+
+```cpp
+void Service::start() {
+  LOGGER_LOG(LogLevel::Info, "Service started");
+}
+```
+
+```text
+[2026-09-05 19:10:00] [INFO] [Service::start] Service started
+```
+
+The library intentionally does not define a shorter `LOG` macro. `LOG` is a
+common global macro name used by other logging libraries, so defining it in a
+public header could cause macro-redefinition errors in applications that use
+more than one dependency.
+
+Direct `Logger::log()` access is intentionally private. This keeps the public
+API consistent: use `LOGGER.someMethod()` for configuration, `LOGGER_LOG` for
+ordinary messages, and `LOGGER_LOG_WITH_CONTEXT` when the context must be
+chosen manually.
+
 `setLogLevel()` sets the highest verbosity that is accepted. For example,
-`ERROR` accepts `ALWAYS`, `FATAL`, and `ERROR`, while `DEBUG` additionally
-accepts `WARN`, `INFO`, and `DEBUG`.
+`LogLevel::Error` accepts `Always`, `Fatal`, and `Error`, while
+`LogLevel::Debug` additionally accepts `Warn`, `Info`, and `Debug`.
 
 ## Log levels and default colors
 
-- `ALWAYS` — white
-- `FATAL` — magenta
-- `ERROR` — red
-- `WARN` — yellow
-- `INFO` — green
-- `DEBUG` — cyan
-- `VERBOSE` — blue
+- `LogLevel::Always` — white
+- `LogLevel::Fatal` — magenta
+- `LogLevel::Error` — red
+- `LogLevel::Warn` — yellow
+- `LogLevel::Info` — green
+- `LogLevel::Debug` — cyan
+- `LogLevel::Verbose` — blue
 
-`ALWAYS` always passes the verbosity threshold. Like every other level, it can
-still be excluded by an active whitelist filter.
+`Always` always passes the verbosity threshold. Like every other level, it can
+still be excluded by an active allowed-level list.
 
-## Avoiding expensive rejected messages
+## Avoiding expensive work for disabled levels
 
 For ordinary strings and inexpensive values, log normally:
 
 ```cpp
-LOGGER_LOG(LOGLEVEL::INFO, "Application started");
+LOGGER_LOG(LogLevel::Info, "Application started");
 ```
 
-The logger checks the threshold and filter before converting the value with
-`std::ostringstream`. However, C++ creates function arguments before calling
-the logger, so this expensive message is still built when `DEBUG` is disabled:
+The logger checks the threshold and allowed-level list before converting the
+value with `std::ostringstream`. However, C++ creates function arguments before
+calling the logger, so this expensive message is still built when `Debug` is
+disabled:
 
 ```cpp
-LOGGER_LOG(LOGLEVEL::DEBUG, buildExpensiveDebugMessage());
+LOGGER_LOG(LogLevel::Debug, buildExpensiveDebugMessage());
 ```
 
 Check the level before doing expensive work:
 
 ```cpp
-if (LOGGER.isEnabled(LOGLEVEL::DEBUG)) {
-  LOGGER_LOG(LOGLEVEL::DEBUG, buildExpensiveDebugMessage());
+if (LOGGER.isEnabled(LogLevel::Debug)) {
+  LOGGER_LOG(LogLevel::Debug, buildExpensiveDebugMessage());
 }
 ```
 
@@ -129,13 +179,13 @@ the context from the compiler-provided function signature:
 
 ```cpp
 void refreshCache() {
-  LOGGER_LOG(LOGLEVEL::INFO, "Refreshing cache");
+  LOGGER_LOG(LogLevel::Info, "Refreshing cache");
 }
 
 class Service {
 public:
   void start() {
-    LOGGER_LOG(LOGLEVEL::INFO, "Service started");
+    LOGGER_LOG(LogLevel::Info, "Service started");
   }
 };
 ```
@@ -161,98 +211,36 @@ standard `__func__`, which normally provides only the function name. Logging
 continues to work, but use an explicit context if a class-qualified name is
 required.
 
-### Lambdas
-
-A lambda has no user-defined function name. Assigning it to a variable does not
-make that variable name available to the logger. `LOGGER_LOG` therefore uses a
-stable `<lambda>` context:
-
-```cpp
-auto callback = [] {
-  LOGGER_LOG(LOGLEVEL::INFO, "Callback invoked");
-};
-```
-
-For a meaningful application-specific name, use
-`LOGGER_LOG_WITH_CONTEXT(level, context, message)`:
+Lambdas have no user-defined function name, so `LOGGER_LOG` reports `<lambda>`.
+Provide a stable application name when it matters:
 
 ```cpp
 auto callback = [] {
   LOGGER_LOG_WITH_CONTEXT(
-      LOGLEVEL::INFO,
+      LogLevel::Info,
       "RequestHandler::onResponse",
       "Callback invoked");
 };
 ```
 
-Use the explicit form whenever context text must remain stable across compilers
-or must not expose generated type names. The context argument can be a string
-literal or a `std::string`.
-
-### Function templates
-
-Templates normally require no special handling:
-
-```cpp
-template <typename T>
-void process(const T &value) {
-  LOGGER_LOG(LOGLEVEL::DEBUG, value);
-}
-
-process(42);
-```
-
-The compiler instantiates `process<int>`, and the logger normalizes the
-compiler signature to that context automatically.
-
-Member-function templates work the same way:
-
-```cpp
-class Serializer {
-public:
-  template <typename T>
-  void write(const T &value) {
-    LOGGER_LOG(LOGLEVEL::DEBUG, value);
-  }
-};
-```
-
-For `serializer.write(42)`, the context resembles
-`Serializer::write<int>`. A member of a class template, such as
-`Repository<User>::save`, retains its instantiated class type. Use
-`LOGGER_LOG_WITH_CONTEXT` when the type name is sensitive, excessively long, or
-must be identical across compilers:
-
-```cpp
-LOGGER_LOG_WITH_CONTEXT(
-    LOGLEVEL::INFO,
-    "UserRepository::save",
-    "Saving user");
-```
-
-### C++20 and newer
-
-The logger does not depend on `std::source_location`. C++20 builds use the same
-compiler-signature implementation and the same macros as C++11 builds. No
-different configuration or call style is required.
-
-Developers who want to understand or change signature parsing can read the
-[beginner-friendly source-context guide](docs/source_context_parser.md). It
-first shows how to use the logger, then explains each internal helper with
-step-by-step examples. The complete runnable example is
-[`examples/15_source_context/15_source_context.cpp`](examples/15_source_context/15_source_context.cpp).
+Templates need no special setup. C++20 builds use the same macros because the
+logger intentionally retains its C++11-compatible implementation. Detailed
+template, lambda, compiler-fallback, and parser examples are kept in the
+[source-context guide](docs/source_context_parser.md). The complete runnable
+example is
+[`examples/04_source_context/source_context.cpp`](examples/04_source_context/source_context.cpp).
 
 ## File and memory sinks
 
 ```cpp
 std::shared_ptr<FileSink> logger_file_sink =
-    LOGGER.addFileSink("application.log", FileOpenMode::APPEND);
+    LOGGER.addFileSink("application.log", FileOpenMode::Append);
 
 if (!logger_file_sink->isOpen())
   std::cerr << logger_file_sink->getLastError() << '\n';
 
 std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
-LOGGER_LOG(LOGLEVEL::INFO, "Stored by every active sink");
+LOGGER_LOG(LogLevel::Info, "Stored by every active sink");
 
 if (!LOGGER.flushAllSinks())
   std::cerr << logger_file_sink->getLastError() << '\n';
@@ -266,26 +254,26 @@ to the sink's internal storage.
 
 ### File open modes
 
-The default mode is `FileOpenMode::APPEND`, which keeps existing content and
-writes new entries at the end. `FileOpenMode::TRUNCATE` clears existing content
+The default mode is `FileOpenMode::Append`, which keeps existing content and
+writes new entries at the end. `FileOpenMode::Truncate` clears existing content
 when the sink opens the file:
 
 ```cpp
-LOGGER.addFileSink("history.log"); // APPEND is the default
-LOGGER.addFileSink("latest.log", FileOpenMode::TRUNCATE);
+LOGGER.addFileSink("history.log"); // Append is the default
+LOGGER.addFileSink("latest.log", FileOpenMode::Truncate);
 ```
 
 ### Flushing and detecting file errors
 
 #### Default behavior
 
-The default behavior is `FileFlushMode::AFTER_EACH_ENTRY`. Every log entry is
+The default behavior is `FileFlushMode::AfterEachEntry`. Every log entry is
 flushed automatically, so the application does not need to call `flush()`:
 
 ```cpp
 LOGGER.addFileSink("application.log");
 
-LOGGER_LOG(LOGLEVEL::INFO, "First message");
+LOGGER_LOG(LogLevel::Info, "First message");
 // The file has already been flushed.
 ```
 
@@ -294,8 +282,8 @@ The call above is equivalent to writing:
 ```cpp
 LOGGER.addFileSink(
     "application.log",
-    FileOpenMode::APPEND,
-    FileFlushMode::AFTER_EACH_ENTRY);
+    FileOpenMode::Append,
+    FileFlushMode::AfterEachEntry);
 ```
 
 Flushing every entry reduces the amount of recent logging that could be lost if
@@ -303,17 +291,17 @@ the application stops unexpectedly.
 
 #### Manual flushing
 
-`FileFlushMode::MANUAL` does not automatically flush after each entry. Keep the
+`FileFlushMode::Manual` does not automatically flush after each entry. Keep the
 returned `FileSink` and call `flush()` when the buffered entries must be written:
 
 ```cpp
 std::shared_ptr<FileSink> logger_file_sink = LOGGER.addFileSink(
     "application.log",
-    FileOpenMode::APPEND,
-    FileFlushMode::MANUAL);
+    FileOpenMode::Append,
+    FileFlushMode::Manual);
 
-LOGGER_LOG(LOGLEVEL::INFO, "First message");
-LOGGER_LOG(LOGLEVEL::INFO, "Second message");
+LOGGER_LOG(LogLevel::Info, "First message");
+LOGGER_LOG(LogLevel::Info, "Second message");
 
 // Flush only this file sink.
 if (!logger_file_sink->flush()) {
@@ -321,7 +309,8 @@ if (!logger_file_sink->flush()) {
 }
 ```
 
-To flush every active sink instead of one specific file, use:
+To flush every sink in the calling thread's active settings instead of one
+specific file, use:
 
 ```cpp
 if (!LOGGER.flushAllSinks()) {
@@ -331,9 +320,9 @@ if (!LOGGER.flushAllSinks()) {
 
 In summary:
 
-- `AFTER_EACH_ENTRY` flushes automatically after every message and is the
+- `AfterEachEntry` flushes automatically after every message and is the
   default.
-- `MANUAL` requires `logger_file_sink->flush()` for one file or
+- `Manual` requires `logger_file_sink->flush()` for one file or
   `LOGGER.flushAllSinks()` for all active sinks.
 - Closing a file normally writes its remaining buffered data, but an explicit
   flush is needed to check whether flushing succeeded.
@@ -371,17 +360,17 @@ that specific sink later:
 ```cpp
 class MySink : public LogSink {
 public:
-  void write(const LogEntry &entry) override {
-    sendSomewhere(entry.text);
+  void write(const LogEntry &entry, const LogStyle &) override {
+    sendSomewhere(entry.formattedText);
   }
 };
 
 std::shared_ptr<MySink> sink = std::make_shared<MySink>();
 SinkHandle handle = LOGGER.addSink(sink);
 
-LOGGER_LOG(LOGLEVEL::INFO, "Sent to MySink");
+LOGGER_LOG(LogLevel::Info, "Sent to MySink");
 LOGGER.removeSink(handle);
-LOGGER_LOG(LOGLEVEL::INFO, "MySink no longer receives this");
+LOGGER_LOG(LogLevel::Info, "MySink no longer receives this");
 ```
 
 `removeSink()` returns `true` when it removes a sink. It returns `false` and
@@ -432,7 +421,7 @@ separately:
 
 ```cpp
 LOGGER_LOG_FIELDS(
-    LOGLEVEL::INFO,
+    LogLevel::Info,
     "Request completed",
     {{"status", "200"}, {"duration_ms", "14"}});
 ```
@@ -444,7 +433,7 @@ additional braces:
 
 ```cpp
 LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
-LOGGER_LOG_FIELDS(LOGLEVEL::INFO, "Request completed", fields);
+LOGGER_LOG_FIELDS(LogLevel::Info, "Request completed", fields);
 ```
 
 Use `LOGGER_LOG` instead when the message has no fields.
@@ -458,38 +447,21 @@ The console, file, and memory sinks produce readable text:
 The timestamp and automatically detected context depend on when and where the
 macro is called. A normal message without fields keeps its existing format.
 
-You can also pass `LogFields` to a specific logger instance:
-
-```cpp
-LogFields fields = {{"status", "200"}, {"duration_ms", "14"}};
-logger.log(LOGLEVEL::INFO, "Request completed", fields);
-```
-
-Example output:
-
-```text
-[2026-09-05 14:30:12] [INFO] [] Request completed [status=200, duration_ms=14]
-```
-
-The context is empty (`[]`) because a direct `logger.log()` call does not
-automatically detect the calling function. Use `LOGGER_LOG_FIELDS` when the
-function or class-method name should be included automatically.
-
 Keys and values are strings, and their insertion order is preserved. Keeping the
 field type this small makes initializer-list use predictable in C++11.
 
-A sink that overrides `write(const LogEntry&)` receives these values separately:
+A sink that overrides `write(const LogEntry&, const LogStyle&)` receives these
+event values separately:
 
 - `timestamp`
 - `level`
 - `message`
-- `function` and `className`
+- `context`
 - `fields`
-- `text`, containing the existing human-readable rendering
+- `formattedText`, containing the human-readable rendering
 
-The project does not include a JSON sink yet. JSON string escaping and entry
-serialization are implemented and tested internally so a future JSON sink will
-not need to parse `text`.
+The project does not include a JSON sink. A future JSON sink should define rules
+for duplicate keys and invalid text before adding its own serializer.
 
 ## Custom log formatting
 
@@ -509,7 +481,7 @@ The smallest custom formatter only needs to override `format()`:
 class SimpleLogFormatter : public LogFormatter {
 public:
   std::string format(const LogEntry &entry) const override {
-    return std::string(toString(entry.level)) + ": " + entry.message;
+    return std::string(logLevelToString(entry.level)) + ": " + entry.message;
   }
 };
 ```
@@ -518,7 +490,7 @@ Install it without changing or replacing any sinks:
 
 ```cpp
 LOGGER.setFormatter(std::make_shared<SimpleLogFormatter>());
-LOGGER_LOG(LOGLEVEL::INFO, "Request completed");
+LOGGER_LOG(LogLevel::Info, "Request completed");
 ```
 
 Example output:
@@ -556,7 +528,7 @@ LOGGER.useDefaultFormatter();
 ```
 
 The complete runnable
-[`examples/18_custom_formatter/18_custom_formatter.cpp`](examples/18_custom_formatter/18_custom_formatter.cpp)
+[`examples/05_structured_formatting/structured_formatting.cpp`](examples/05_structured_formatting/structured_formatting.cpp)
 demonstrates custom timestamp, level, source context, and field rendering.
 
 Formatter changes follow the same thread-local `ScopedSettings` behavior as the
@@ -565,25 +537,25 @@ log call keeps its selected formatter alive until that message finishes. Calls
 to the formatter and sinks are serialized. A formatter can therefore be changed
 while other threads are logging through the same `Logger`.
 
-## Filtering selected levels
+## Allowing only selected levels
 
-The threshold and whitelist are both applied:
+The verbosity threshold and allowed-level list are both applied:
 
 ```cpp
-LOGGER.setLogLevel(LOGLEVEL::DEBUG);
-LOGGER.setFilterLevels({LOGLEVEL::ERROR, LOGLEVEL::WARN});
+LOGGER.setLogLevel(LogLevel::Debug);
+LOGGER.setAllowedLevels({LogLevel::Error, LogLevel::Warn});
 
-LOGGER_LOG(LOGLEVEL::DEBUG, "Filtered out");
-LOGGER_LOG(LOGLEVEL::ERROR, "Allowed");
+LOGGER_LOG(LogLevel::Debug, "Filtered out");
+LOGGER_LOG(LogLevel::Error, "Allowed");
 
-LOGGER.clearFilterLevels();
+LOGGER.clearAllowedLevels();
 ```
 
 ## Custom colors
 
 ```cpp
-LOGGER.setLevelColor(LOGLEVEL::INFO, Color::CYAN);
-LOGGER_LOG(LOGLEVEL::INFO, "Cyan console message");
+LOGGER.setLevelColor(LogLevel::Info, Color::Cyan);
+LOGGER_LOG(LogLevel::Info, "Cyan console message");
 ```
 
 Colors are owned as strings by the logger. File and memory sinks receive plain
@@ -603,27 +575,27 @@ NO_COLOR=1 ./your_application
 Applications can override automatic detection:
 
 ```cpp
-LOGGER.setColorEnabled(false); // Always use plain console output
-LOGGER.setColorEnabled(true);  // Always include ANSI colors
-LOGGER.useAutomaticColor();    // Detect the terminal and respect NO_COLOR
+LOGGER.setColorMode(ColorMode::Disabled); // Always use plain console output
+LOGGER.setColorMode(ColorMode::Enabled);  // Always include ANSI colors
+LOGGER.setColorMode(ColorMode::Automatic);    // Detect the terminal and respect NO_COLOR
 ```
 
 The logger stores this choice as a `ColorMode`:
 
 | Mode | How to select it | Behaviour |
 | --- | --- | --- |
-| `ColorMode::AUTOMATIC` | Default, or call `useAutomaticColor()` | Uses color for a supported interactive terminal. Uses plain text for redirected output or when `NO_COLOR` is set. |
-| `ColorMode::ENABLED` | Call `setColorEnabled(true)` | Always adds ANSI color codes, even when output is redirected or `NO_COLOR` is set. |
-| `ColorMode::DISABLED` | Call `setColorEnabled(false)` | Never adds ANSI color codes. |
+| `ColorMode::Automatic` | Default, or call `setColorMode(ColorMode::Automatic)` | Uses color for a supported interactive terminal. Uses plain text for redirected output or when `NO_COLOR` is set. |
+| `ColorMode::Enabled` | Call `setColorMode(ColorMode::Enabled)` | Always adds ANSI color codes, even when output is redirected or `NO_COLOR` is set. |
+| `ColorMode::Disabled` | Call `setColorMode(ColorMode::Disabled)` | Never adds ANSI color codes. |
 
-Most applications should keep the default `AUTOMATIC` mode. Use `ENABLED` only
+Most applications should keep the default `Automatic` mode. Use `Enabled` only
 when the destination is known to understand ANSI codes. Otherwise, redirected
-logs may contain visible escape characters. Use `DISABLED` when plain output is
+logs may contain visible escape characters. Use `Disabled` when plain output is
 always required.
 
 ### How automatic terminal detection works
 
-In `AUTOMATIC` mode, the logger checks standard output (`stdout`) before adding
+In `Automatic` mode, the logger checks standard output (`stdout`) before adding
 ANSI color codes:
 
 - On Linux and macOS, it calls `isatty(STDOUT_FILENO)`. A true result means
@@ -637,23 +609,23 @@ ANSI color codes:
   cannot be confirmed.
 
 After detecting the terminal, the logger checks `NO_COLOR`. A non-empty value
-turns color off in `AUTOMATIC` mode even when stdout is an interactive terminal.
+turns color off in `Automatic` mode even when stdout is an interactive terminal.
 
-Explicit `ENABLED` or `DISABLED` settings take priority over `NO_COLOR` and
+Explicit `Enabled` or `Disabled` settings take priority over `NO_COLOR` and
 terminal detection. These settings also work with `ScopedSettings`, so temporary
 changes are restored automatically.
 
 ## Temporary settings
 
-Prefer the scoped API. It restores the level, filter, colors, sinks, and memory
-sink even when code exits early or throws an exception:
+Prefer the scoped API. It restores the level, allowed-level list, colors, sinks,
+memory sink, and formatter even when code exits early or throws an exception:
 
 ```cpp
 {
   ScopedSettings temporary = LOGGER.scopedSettings();
-  LOGGER.setLogLevel(LOGLEVEL::ERROR);
-  LOGGER.setFilterLevels({LOGLEVEL::ERROR});
-  LOGGER_LOG(LOGLEVEL::ERROR, "Temporary configuration");
+  LOGGER.setLogLevel(LogLevel::Error);
+  LOGGER.setAllowedLevels({LogLevel::Error});
+  LOGGER_LOG(LogLevel::Error, "Temporary configuration");
 }
 ```
 
@@ -674,14 +646,14 @@ after the thread exits. The token selects the thread's temporary settings stack.
 In simplified form, the lookup works like this:
 
 ```cpp
-LoggerState &activeStateForCurrentThread() {
+Settings &activeSettingsForCurrentThread() {
   const ThreadToken threadToken = getCurrentThreadToken();
-  const auto stack = m_scopedStateStacks.find(threadToken);
+  const auto stack = m_scopedSettingsStacks.find(threadToken);
 
-  if (stack == m_scopedStateStacks.end() || stack->second.empty())
-    return m_globalState;
+  if (stack == m_scopedSettingsStacks.end() || stack->second.empty())
+    return m_globalSettings;
 
-  return stack->second.back();
+  return stack->second.back().m_settings;
 }
 ```
 
@@ -692,6 +664,12 @@ stack left alive by an older thread. The token provides identity, not
 synchronization; a mutex still protects the shared map while stacks are read,
 added, updated, or removed.
 
+Each scope also has its own ID. Cleanup removes that exact scope instead of
+blindly removing the top item. This matters when an outer scope is moved and
+destroyed before a nested scope. The nested scope remains active until its own
+guard is destroyed. A `Logger` must outlive every `ScopedSettings` guard created
+from it.
+
 Consequently, temporary settings can safely overlap:
 
 ```cpp
@@ -699,14 +677,14 @@ Consequently, temporary settings can safely overlap:
 
 std::thread restrictiveWorker([] {
   ScopedSettings temporary = LOGGER.scopedSettings();
-  LOGGER.setLogLevel(LOGLEVEL::ERROR);
-  LOGGER_LOG(LOGLEVEL::INFO, "Hidden only in this thread");
+  LOGGER.setLogLevel(LogLevel::Error);
+  LOGGER_LOG(LogLevel::Info, "Hidden only in this thread");
 });
 
 std::thread verboseWorker([] {
   ScopedSettings temporary = LOGGER.scopedSettings();
-  LOGGER.setLogLevel(LOGLEVEL::DEBUG);
-  LOGGER_LOG(LOGLEVEL::DEBUG, "Visible in this thread");
+  LOGGER.setLogLevel(LogLevel::Debug);
+  LOGGER_LOG(LogLevel::Debug, "Visible in this thread");
 });
 
 restrictiveWorker.join();
@@ -715,36 +693,40 @@ verboseWorker.join();
 
 ## Custom sinks
 
-Implement `write(const LogEntry&)`. Use `entry.text` when the sink only needs the
-fully formatted line:
+Implement `write(const LogEntry&, const LogStyle&)`. Use
+`entry.formattedText` when the sink only needs the fully formatted line:
 
 ```cpp
 class MySink : public LogSink {
 public:
-  void write(const LogEntry &entry) override {
-    sendSomewhere(entry.text);
+  void write(const LogEntry &entry, const LogStyle &) override {
+    sendSomewhere(entry.formattedText);
   }
 };
 
 LOGGER.addSink(std::make_shared<MySink>());
 ```
 
-The same entry also provides the timestamp, level, original message, source
-context, fields, and selected color. A sink can use those values directly
-without parsing `entry.text`.
+The entry also provides the timestamp, level, original message, source context,
+and fields. The separate `LogStyle` argument contains the selected console color
+and color mode. Non-console sinks can ignore it.
 
-## Isolated logger instances
-
-Macros use the process-wide default logger. Tests and independent components
-can construct a separate logger instead:
+If a custom formatter or sink throws an exception, the logger catches it.
+A failing sink does not prevent later sinks from receiving the same entry. Check
+and clear the logger-level status like this:
 
 ```cpp
-Logger logger(false); // false means no default console sink
-logger.addSink(std::make_shared<MySink>());
-logger.log(LOGLEVEL::INFO, "message", "functionName");
+if (LOGGER.hasError()) {
+  std::cerr << LOGGER.getLastError() << '\n';
+  LOGGER.clearError();
+}
 ```
 
-Messages can be strings or any value supported by `operator<<`.
+`FileSink::getLastError()` reports file open, write, and flush failures for one
+file. `Logger::getLastError()` reports failures thrown by custom formatters or
+sinks. The logger also stops a recursive logging chain after eight nested calls.
+This protects an application when a custom sink accidentally calls the same
+logger from its `write()` method.
 
 ## CMake integration
 
@@ -782,7 +764,7 @@ The install step exports the header and CMake target.
 ## Logging macros
 
 Use `LOGGER_LOG` for normal logging. Use `LOGGER_LOG_WITH_CONTEXT` when you need
-to provide a stable context name, such as for a lambda. `LOGLEVEL` is the single
+to provide a stable context name, such as for a lambda. `LogLevel` is the single
 public log-level type name.
 
 ## Thread safety

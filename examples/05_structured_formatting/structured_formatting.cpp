@@ -12,8 +12,8 @@ public:
 
   std::string format(const LogEntry &entry) const override {
     std::ostringstream output;
-    output << entry.timestamp << ' ' << (entry.level == LOGLEVEL::INFO ? "I" : toString(entry.level)) << ' '
-           << entry.function << " | " << entry.message;
+    output << entry.timestamp << ' ' << (entry.level == LogLevel::Info ? "I" : logLevelToString(entry.level)) << ' '
+           << entry.context << " | " << entry.message;
 
     if (!entry.fields.empty()) {
       output << " {";
@@ -29,11 +29,11 @@ public:
 };
 
 void logCompletedRequest() {
-  LOGGER_LOG_FIELDS(LOGLEVEL::INFO, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
+  LOGGER_LOG_FIELDS(LogLevel::Info, "Request completed", {{"status", "200"}, {"duration_ms", "14"}});
 }
 
 int main() {
-  printf("Example 18: Change formatting without changing sinks.\n");
+  std::printf("Structured fields and custom formatting.\n");
   LOGGER.setFormatter(std::make_shared<CompactLogFormatter>());
   logCompletedRequest();
   return 0;

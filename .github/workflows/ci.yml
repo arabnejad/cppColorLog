@@ -21,6 +21,7 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      CXXFLAGS: -std=c++11
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -61,4 +62,4 @@ jobs:
         run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Run examples
-        run: cmake --build build --config Release --target run_all_samples
+        run: cmake --build build --config Release --target cppcolorlogger_run_examples

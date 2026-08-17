@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.14)
 project(CppColorLogger VERSION 1.0.0 LANGUAGES CXX)
 
+if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not supported. Use: cmake -S . -B build")
+endif()
+
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
@@ -28,42 +32,51 @@ if(CPPCOLORLOGGER_BUILD_EXAMPLES)
     set(EXAMPLE_TARGETS "")
     foreach(example_file IN LISTS EXAMPLE_SOURCES)
         get_filename_component(example_name ${example_file} NAME_WE)
-        add_executable(${example_name} ${example_file})
-        target_link_libraries(${example_name} PRIVATE CppColorLogger::cppColorLogger)
-        list(APPEND EXAMPLE_TARGETS ${example_name})
+        set(example_target cppcolorlogger_example_${example_name})
+        add_executable(${example_target} ${example_file})
+        set_target_properties(${example_target} PROPERTIES
+            OUTPUT_NAME ${example_name}
+            CXX_STANDARD 11
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS NO
+        )
+        target_link_libraries(${example_target} PRIVATE CppColorLogger::cppColorLogger)
+        list(APPEND EXAMPLE_TARGETS ${example_target})
     endforeach()
 
-    add_custom_target(examples DEPENDS ${EXAMPLE_TARGETS})
-    add_custom_target(run_all_samples
+    add_custom_target(cppcolorlogger_examples DEPENDS ${EXAMPLE_TARGETS})
+    add_custom_target(cppcolorlogger_run_examples
         COMMAND ${CMAKE_COMMAND} -E echo "Running all examples..."
         DEPENDS ${EXAMPLE_TARGETS}
         USES_TERMINAL
     )
 
     foreach(example_target IN LISTS EXAMPLE_TARGETS)
-        add_custom_command(TARGET run_all_samples POST_BUILD
+        add_custom_command(TARGET cppcolorlogger_run_examples POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E echo "Running ${example_target}..."
             COMMAND $<TARGET_FILE:${example_target}>
         )
     endforeach()
 endif()
 
-find_program(CLANG_FORMAT_EXE NAMES clang-format)
-if(CLANG_FORMAT_EXE)
-    file(GLOB_RECURSE FORMAT_FILES CONFIGURE_DEPENDS
-        ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
-    )
-    add_custom_target(clang_format
-        COMMAND ${CLANG_FORMAT_EXE} -i ${FORMAT_FILES}
-        COMMENT "Formatting source files"
-    )
-else()
-    add_custom_target(clang_format
-        COMMAND ${CMAKE_COMMAND} -E echo "clang-format was not found"
-        COMMAND ${CMAKE_COMMAND} -E false
-    )
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    find_program(CLANG_FORMAT_EXE NAMES clang-format)
+    if(CLANG_FORMAT_EXE)
+        file(GLOB_RECURSE FORMAT_FILES CONFIGURE_DEPENDS
+            ${CMAKE_CURRENT_SOURCE_DIR}/examples/*.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/include/*.h
+            ${CMAKE_CURRENT_SOURCE_DIR}/tests/*.cpp
+        )
+        add_custom_target(cppcolorlogger_format
+            COMMAND ${CLANG_FORMAT_EXE} -i ${FORMAT_FILES}
+            COMMENT "Formatting source files"
+        )
+    else()
+        add_custom_target(cppcolorlogger_format
+            COMMAND ${CMAKE_COMMAND} -E echo "clang-format was not found"
+            COMMAND ${CMAKE_COMMAND} -E false
+        )
+    endif()
 endif()
 
 if(CPPCOLORLOGGER_BUILD_TESTS)
@@ -92,23 +105,27 @@ if(CPPCOLORLOGGER_BUILD_TESTS AND BUILD_TESTING)
         FetchContent_MakeAvailable(googletest)
     endif()
 
-    add_executable(logger_tests
+    add_executable(cppcolorlogger_tests
+        tests/error_macro_compatibility.cpp
         tests/logger_from_another_translation_unit.cpp
         tests/test_logger.cpp
     )
-    target_link_libraries(logger_tests PRIVATE
+    set_target_properties(cppcolorlogger_tests PROPERTIES
+        OUTPUT_NAME logger_tests
+        CXX_STANDARD 11
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS NO
+    )
+    target_link_libraries(cppcolorlogger_tests PRIVATE
         CppColorLogger::cppColorLogger
         GTest::gtest_main
     )
-
-    add_test(NAME logger_tests COMMAND logger_tests)
-    add_custom_target(tests DEPENDS logger_tests)
-    add_custom_target(run_tests
-        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
-        DEPENDS logger_tests
-        USES_TERMINAL
+    target_compile_definitions(cppcolorlogger_tests PRIVATE
+        CPPCOLORLOGGER_INTERNAL_TESTING
     )
+
+    include(GoogleTest)
+    gtest_discover_tests(cppcolorlogger_tests)
 endif()
 
 install(TARGETS cppColorLogger EXPORT CppColorLoggerTargets)

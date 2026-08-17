@@ -11,9 +11,9 @@
 #include <string>
 
 bool colorsAreAvailableFromAnotherTranslationUnit() {
-  return !std::string(Color::RED).empty() && !std::string(Color::GREEN).empty();
+  return !std::string(Color::Red).empty() && !std::string(Color::Green).empty();
 }
 
 bool infoIsEnabledFromAnotherTranslationUnit() {
-  return LOGGER.isEnabled(LOGLEVEL::INFO);
+  return LOGGER.isEnabled(LogLevel::Info);
 }
