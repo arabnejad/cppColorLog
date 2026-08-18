@@ -21,7 +21,6 @@ jobs:
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
-      CXXFLAGS: -std=c++11
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -36,10 +35,14 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential clang
 
       - name: Build and run unit tests
-        run: make test BUILD_DIR=build-${{ matrix.name }}
+        run: >-
+          make test BUILD_DIR=build-${{ matrix.name }}
+          CXXFLAGS=-std=c++11
 
       - name: Build and run examples
-        run: make run-examples BUILD_DIR=build-${{ matrix.name }}
+        run: >-
+          make run-examples BUILD_DIR=build-${{ matrix.name }}
+          CXXFLAGS=-std=c++11
 
   windows-build-and-test:
     runs-on: windows-latest
@@ -53,7 +56,13 @@ jobs:
           cmake-version: '3.28.0'
 
       - name: Configure project
-        run: cmake -S . -B build -DCPPCOLORLOGGER_BUILD_TESTS=ON -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
+        run: >-
+          cmake -S . -B build
+          -DCPPCOLORLOGGER_BUILD_TESTS=ON
+          -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
+          -DCMAKE_CXX_STANDARD=11
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON
+          -DCMAKE_CXX_EXTENSIONS=OFF
 
       - name: Build project
         run: cmake --build build --config Release
@@ -63,3 +72,95 @@ jobs:
 
       - name: Run examples
         run: cmake --build build --config Release --target cppcolorlogger_run_examples
+
+  address-and-undefined-sanitizers:
+    runs-on: ubuntu-latest
+    env:
+      CC: clang
+      CXX: clang++
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+
+      - name: Configure sanitized tests
+        run: >-
+          cmake -S . -B build-sanitized
+          -DCPPCOLORLOGGER_BUILD_TESTS=ON
+          -DBUILD_TESTING=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_STANDARD=11
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON
+          -DCMAKE_CXX_EXTENSIONS=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+
+      - name: Build sanitized tests
+        run: cmake --build build-sanitized --target cppcolorlogger_tests --parallel 2
+
+      - name: Run sanitized tests
+        run: ./build-sanitized/logger_tests --gtest_brief=1
+
+  thread-sanitizer:
+    runs-on: ubuntu-22.04
+    env:
+      CC: gcc
+      CXX: g++
+      TSAN_OPTIONS: halt_on_error=1
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure thread-sanitized tests
+        run: >-
+          cmake -S . -B build-thread-sanitized
+          -DCPPCOLORLOGGER_BUILD_TESTS=ON
+          -DBUILD_TESTING=ON
+          -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_CXX_STANDARD=11
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON
+          -DCMAKE_CXX_EXTENSIONS=OFF
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -fno-omit-frame-pointer"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+
+      - name: Build thread-sanitized tests
+        run: cmake --build build-thread-sanitized --target cppcolorlogger_tests --parallel 2
+
+      - name: Run thread-sanitized tests
+        run: ./build-thread-sanitized/logger_tests --gtest_brief=1
+
+  cmake-consumers:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install the library
+        run: >-
+          cmake -S . -B build-install
+          -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/install"
+          -DCPPCOLORLOGGER_BUILD_TESTS=OFF
+          -DCPPCOLORLOGGER_BUILD_EXAMPLES=OFF
+          && cmake --build build-install --target install
+
+      - name: Configure installed-package consumer
+        run: >-
+          cmake -S tests/consumers/installed -B build-installed-consumer
+          -DCMAKE_PREFIX_PATH="${{ github.workspace }}/install"
+
+      - name: Build and run installed-package consumer
+        run: >-
+          cmake --build build-installed-consumer --parallel 2
+          && ./build-installed-consumer/installed_package_consumer
+
+      - name: Configure add_subdirectory consumer
+        run: cmake -S tests/consumers/add_subdirectory -B build-subdirectory-consumer
+
+      - name: Build and run add_subdirectory consumer
+        run: >-
+          cmake --build build-subdirectory-consumer --parallel 2
+          && ./build-subdirectory-consumer/add_subdirectory_consumer
