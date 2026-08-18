@@ -809,9 +809,7 @@ class Logger;
 class ScopedSettings;
 
 namespace cppcolorlogger_detail {
-#if defined(CPPCOLORLOGGER_INTERNAL_TESTING)
-class LoggerInstance;
-#endif
+class LoggerTestAccess;
 struct LoggerLogAccess;
 Logger &defaultLogger();
 } // namespace cppcolorlogger_detail
@@ -855,14 +853,13 @@ class Logger {
 
 private:
   friend class ScopedSettings;
-#if defined(CPPCOLORLOGGER_INTERNAL_TESTING)
-  friend class cppcolorlogger_detail::LoggerInstance;
-#endif
+  friend class cppcolorlogger_detail::LoggerTestAccess;
   friend struct cppcolorlogger_detail::LoggerLogAccess;
   friend Logger &cppcolorlogger_detail::defaultLogger();
 
-  // Applications use the shared LOGGER instance. The private constructor also
-  // lets the test suite create isolated instances through an internal helper.
+  // Applications use the shared LOGGER instance. LoggerTestAccess is declared
+  // consistently above and defined only by the unit tests when isolated logger
+  // state is required.
   explicit Logger(bool addDefaultConsoleSink = true)
       : m_nextSinkId(1), m_nextScopeId(1), m_loggerToken(createLoggerToken()) {
     if (addDefaultConsoleSink)
@@ -1304,16 +1301,6 @@ private:
 };
 
 namespace cppcolorlogger_detail {
-
-#if defined(CPPCOLORLOGGER_INTERNAL_TESTING)
-// This type exists only in unit-test builds so each test can use isolated state.
-class LoggerInstance : public Logger {
-public:
-  explicit LoggerInstance(bool addDefaultConsoleSink = true) : Logger(addDefaultConsoleSink) {}
-
-  using Logger::log;
-};
-#endif
 
 // Logging macros use this friend to reach Logger::log() without making direct
 // logging part of the public Logger API.

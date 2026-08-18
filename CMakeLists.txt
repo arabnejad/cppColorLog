@@ -120,9 +120,6 @@ if(CPPCOLORLOGGER_BUILD_TESTS AND BUILD_TESTING)
         CppColorLogger::cppColorLogger
         GTest::gtest_main
     )
-    target_compile_definitions(cppcolorlogger_tests PRIVATE
-        CPPCOLORLOGGER_INTERNAL_TESTING
-    )
 
     include(GoogleTest)
     gtest_discover_tests(cppcolorlogger_tests)

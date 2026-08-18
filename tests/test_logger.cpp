@@ -38,11 +38,25 @@ public:
   }
 };
 
+namespace cppcolorlogger_detail {
+
+// Logger keeps construction and direct logging private in production. This
+// test-only friend provides isolated Logger instances without changing the
+// definitions seen by other translation units.
+class LoggerTestAccess : public ::Logger {
+public:
+  explicit LoggerTestAccess(bool addDefaultConsoleSink = true) : Logger(addDefaultConsoleSink) {}
+
+  using Logger::log;
+};
+
+} // namespace cppcolorlogger_detail
+
 namespace {
 
 // Production code uses LOGGER and the LOGGER_LOG macros. Tests use this
 // internal type to give each case an isolated logger state.
-using Logger = cppcolorlogger_detail::LoggerInstance;
+using Logger = cppcolorlogger_detail::LoggerTestAccess;
 
 class LoggerTest : public ::testing::Test {
 protected:
