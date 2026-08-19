@@ -12,8 +12,7 @@ int main() {
       LOGGER.addFileSink("example.log", FileOpenMode::Truncate, FileFlushMode::Manual);
   std::shared_ptr<InMemorySink> memory_sink = LOGGER.enableInMemorySink();
 
-  std::shared_ptr<ConsoleSink> console_sink   = std::make_shared<ConsoleSink>();
-  const SinkHandle             console_handle = LOGGER.addSink(console_sink);
+  const SinkHandle console_handle = LOGGER.addConsoleSink(ConsoleStream::Stderr);
 
   LOGGER_LOG(LogLevel::Info, "Written to all three sinks");
   LOGGER.removeSink(console_handle);

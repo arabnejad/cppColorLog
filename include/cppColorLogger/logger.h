@@ -65,6 +65,10 @@ inline const char *logLevelToString(LogLevel level) {
 // ANSI colors, and Disabled always emits plain text.
 enum class ColorMode { Automatic, Enabled, Disabled };
 
+// Stdout is the default destination for console logs. Stderr keeps diagnostic
+// logs separate from normal program output such as generated data.
+enum class ConsoleStream { Stdout, Stderr };
+
 // Append preserves existing file contents. Truncate clears the file when the
 // sink opens it.
 enum class FileOpenMode { Append, Truncate };
@@ -519,23 +523,24 @@ inline bool resolveColorEnabled(ColorMode mode, bool terminalSupportsColor, bool
 }
 
 /**
- * @brief Detects whether standard output can display ANSI colors.
+ * @brief Detects whether the selected console stream can display ANSI colors.
  *
- * On Linux and macOS, isatty(STDOUT_FILENO) checks whether stdout is connected
+ * On Linux and macOS, isatty() checks whether the selected stream is connected
  * to a terminal instead of a file or pipe. An interactive terminal is assumed
  * to support ANSI colors.
  *
- * On Windows, GetStdHandle() finds stdout and GetConsoleMode() verifies that it
- * is a console. If needed, SetConsoleMode() attempts to enable virtual-terminal
- * processing, which allows the console to understand ANSI color codes.
+ * On Windows, GetStdHandle() finds the selected stream and GetConsoleMode()
+ * verifies that it is a console. If needed, SetConsoleMode() attempts to enable
+ * virtual-terminal processing, which allows ANSI color codes.
  *
  * Other platforms return false because color support cannot be confirmed. The
  * NO_COLOR environment variable is handled separately by
  * shouldUseConsoleColor().
  */
-inline bool consoleSupportsColor() {
+inline bool consoleSupportsColor(ConsoleStream stream) {
 #if defined(_WIN32)
-  const HANDLE output = GetStdHandle(STD_OUTPUT_HANDLE);
+  const DWORD  handleId = stream == ConsoleStream::Stdout ? STD_OUTPUT_HANDLE : STD_ERROR_HANDLE;
+  const HANDLE output   = GetStdHandle(handleId);
   if (output == INVALID_HANDLE_VALUE || output == nullptr)
     return false;
 
@@ -548,8 +553,10 @@ inline bool consoleSupportsColor() {
     return true;
   return SetConsoleMode(output, mode | virtualTerminalProcessing) != 0;
 #elif defined(__unix__) || defined(__APPLE__)
-  return ::isatty(STDOUT_FILENO) != 0;
+  const int fileDescriptor = stream == ConsoleStream::Stdout ? STDOUT_FILENO : STDERR_FILENO;
+  return ::isatty(fileDescriptor) != 0;
 #else
+  (void)stream;
   return false;
 #endif
 }
@@ -561,10 +568,10 @@ inline bool consoleSupportsColor() {
  * virtual-terminal processing. Automatic mode respects both terminal support
  * and the NO_COLOR environment variable.
  */
-inline bool shouldUseConsoleColor(ColorMode mode) {
+inline bool shouldUseConsoleColor(ColorMode mode, ConsoleStream stream) {
   if (mode == ColorMode::Enabled) {
 #if defined(_WIN32)
-    (void)consoleSupportsColor();
+    (void)consoleSupportsColor(stream);
 #endif
     return true;
   }
@@ -572,7 +579,7 @@ inline bool shouldUseConsoleColor(ColorMode mode) {
     return false;
 
   const bool noColorRequested      = hasNoColorValue(std::getenv("NO_COLOR"));
-  const bool terminalSupportsColor = noColorRequested ? false : consoleSupportsColor();
+  const bool terminalSupportsColor = noColorRequested ? false : consoleSupportsColor(stream);
   return resolveColorEnabled(mode, terminalSupportsColor, noColorRequested);
 }
 
@@ -696,22 +703,31 @@ public:
 
 class ConsoleSink : public LogSink {
 public:
+  explicit ConsoleSink(ConsoleStream stream = ConsoleStream::Stdout) : m_stream(stream) {}
+
   void write(const LogEntry &entry, const LogStyle &style) override {
     std::lock_guard<std::mutex> console_lck(m_console_mux);
-    if (cppcolorlogger_detail::shouldUseConsoleColor(style.colorMode) && !style.color.empty())
-      std::cout << style.color << entry.formattedText << Color::Reset << std::endl;
+    std::ostream                &output = outputStream();
+    if (cppcolorlogger_detail::shouldUseConsoleColor(style.colorMode, m_stream) && !style.color.empty())
+      output << style.color << entry.formattedText << Color::Reset << std::endl;
     else
-      std::cout << entry.formattedText << std::endl;
+      output << entry.formattedText << std::endl;
   }
 
   bool flush() override {
     std::lock_guard<std::mutex> console_lck(m_console_mux);
-    std::cout.flush();
-    return static_cast<bool>(std::cout);
+    std::ostream                &output = outputStream();
+    output.flush();
+    return static_cast<bool>(output);
   }
 
 private:
-  std::mutex m_console_mux;
+  std::ostream &outputStream() {
+    return m_stream == ConsoleStream::Stdout ? std::cout : std::cerr;
+  }
+
+  ConsoleStream m_stream;
+  std::mutex    m_console_mux;
 };
 
 /**
@@ -923,11 +939,12 @@ public:
   /**
    * @brief Adds a console sink and returns its removal handle.
    *
-   * Use this to restore console logging after removing the default console sink
-   * or calling clearSinks().
+   * Stdout is used by default. Select Stderr to keep diagnostic logs separate
+   * from normal program output. Use this method to restore console logging after
+   * removing the default console sink or calling clearSinks().
    */
-  SinkHandle addConsoleSink() {
-    return addSink(std::make_shared<ConsoleSink>());
+  SinkHandle addConsoleSink(ConsoleStream stream = ConsoleStream::Stdout) {
+    return addSink(std::make_shared<ConsoleSink>(stream));
   }
 
   /** Returns the handle created for this Logger's initial console sink. */

@@ -388,6 +388,33 @@ SinkHandle console = LOGGER.addConsoleSink();
 std::shared_ptr<InMemorySink> memory = LOGGER.enableInMemorySink();
 ```
 
+`addConsoleSink()` writes to standard output by default. Command-line programs
+can send logs to standard error so normal program output remains clean:
+
+```cpp
+LOGGER.clearSinks();
+LOGGER.addConsoleSink(ConsoleStream::Stderr);
+
+std::cout << "{\"status\":\"success\"}" << '\n';
+LOGGER_LOG(LogLevel::Info, "Request completed");
+```
+
+The two streams can then be redirected independently:
+
+```bash
+./your_application > result.json 2> application.log
+```
+
+Use `ConsoleStream::Stdout` explicitly when desired, or omit the argument:
+
+```cpp
+LOGGER.addConsoleSink(ConsoleStream::Stdout);
+LOGGER.addConsoleSink(); // Also stdout
+```
+
+Call `clearSinks()` first when replacing the default console sink. Otherwise,
+adding another console sink makes each message appear in both destinations.
+
 The default console sink can also be removed individually:
 
 ```cpp
@@ -561,10 +588,10 @@ LOGGER_LOG(LogLevel::Info, "Cyan console message");
 Colors are owned as strings by the logger. File and memory sinks receive plain
 text without ANSI escape sequences.
 
-By default, `ConsoleSink` adds ANSI colors only when standard output is an
-interactive terminal. Redirected output, such as a file or pipe, stays plain.
-On Windows, the logger enables virtual-terminal processing when the console
-supports it.
+By default, `ConsoleSink` adds ANSI colors only when its selected output stream
+is an interactive terminal. Redirected output, such as a file or pipe, stays
+plain. On Windows, the logger enables virtual-terminal processing when the
+selected console stream supports it.
 
 A non-empty `NO_COLOR` environment variable disables colors in automatic mode:
 
@@ -595,21 +622,23 @@ always required.
 
 ### How automatic terminal detection works
 
-In `Automatic` mode, the logger checks standard output (`stdout`) before adding
-ANSI color codes:
+In `Automatic` mode, the logger checks the stream selected when the console sink
+was created before adding ANSI color codes:
 
-- On Linux and macOS, it calls `isatty(STDOUT_FILENO)`. A true result means
-  stdout is connected to an interactive terminal, which the logger assumes can
-  display ANSI colors. Redirection to a file or pipe normally returns false.
-- On Windows, it calls `GetStdHandle(STD_OUTPUT_HANDLE)` and `GetConsoleMode()`
-  to verify that stdout is a console. It then uses `SetConsoleMode()` to enable
-  virtual-terminal processing. Automatic color is used only when these checks
-  succeed.
+- On Linux and macOS, it calls `isatty()` with `STDOUT_FILENO` or
+  `STDERR_FILENO`. A true result means the selected stream is connected to an
+  interactive terminal, which the logger assumes can display ANSI colors.
+  Redirection to a file or pipe normally returns false.
+- On Windows, it requests `STD_OUTPUT_HANDLE` or `STD_ERROR_HANDLE` and calls
+  `GetConsoleMode()` to verify that the selected stream is a console. It then
+  uses `SetConsoleMode()` to enable virtual-terminal processing. Automatic
+  color is used only when these checks succeed.
 - On other platforms, automatic color is disabled because terminal support
   cannot be confirmed.
 
 After detecting the terminal, the logger checks `NO_COLOR`. A non-empty value
-turns color off in `Automatic` mode even when stdout is an interactive terminal.
+turns color off in `Automatic` mode even when the selected stream is an
+interactive terminal.
 
 Explicit `Enabled` or `Disabled` settings take priority over `NO_COLOR` and
 terminal detection. These settings also work with `ScopedSettings`, so temporary

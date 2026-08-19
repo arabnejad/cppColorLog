@@ -62,7 +62,9 @@ class LoggerTest : public ::testing::Test {
 protected:
   const std::string               logFile = "test_log_output.txt";
   std::stringstream               capturedCout;
+  std::stringstream               capturedCerr;
   std::streambuf                 *oldCout = nullptr;
+  std::streambuf                 *oldCerr = nullptr;
   std::unique_ptr<ScopedSettings> m_testSettings;
 
   void SetUp() override {
@@ -71,10 +73,12 @@ protected:
     LOGGER.setLogLevel(LogLevel::Info);
     LOGGER.clearAllowedLevels();
     oldCout = std::cout.rdbuf(capturedCout.rdbuf());
+    oldCerr = std::cerr.rdbuf(capturedCerr.rdbuf());
   }
 
   void TearDown() override {
     std::cout.rdbuf(oldCout);
+    std::cerr.rdbuf(oldCerr);
     m_testSettings.reset();
     std::remove(logFile.c_str());
   }
@@ -507,6 +511,17 @@ TEST_F(LoggerTest, ConsoleOmitsColorWhenExplicitlyDisabled) {
   EXPECT_EQ(output.find("\033["), std::string::npos);
 }
 
+TEST_F(LoggerTest, ConsoleCanWriteToStderr) {
+  Logger logger(false);
+  logger.addConsoleSink(ConsoleStream::Stderr);
+  logger.setColorMode(ColorMode::Disabled);
+
+  logger.log(LogLevel::Info, "Diagnostic message", "consoleTest");
+
+  EXPECT_EQ(capturedCout.str().find("Diagnostic message"), std::string::npos);
+  EXPECT_NE(capturedCerr.str().find("Diagnostic message"), std::string::npos);
+}
+
 TEST(ConsoleColorPolicyTest, AutomaticColorRequiresSupportedTerminal) {
   using cppcolorlogger_detail::resolveColorEnabled;
 
@@ -532,7 +547,8 @@ TEST(ConsoleColorPolicyTest, NoColorRequiresANonEmptyValue) {
 
 #if defined(__unix__) || defined(__APPLE__)
 TEST(ConsoleColorPolicyTest, PosixTerminalDetectionUsesIsatty) {
-  EXPECT_EQ(cppcolorlogger_detail::consoleSupportsColor(), ::isatty(STDOUT_FILENO) != 0);
+  EXPECT_EQ(cppcolorlogger_detail::consoleSupportsColor(ConsoleStream::Stdout), ::isatty(STDOUT_FILENO) != 0);
+  EXPECT_EQ(cppcolorlogger_detail::consoleSupportsColor(ConsoleStream::Stderr), ::isatty(STDERR_FILENO) != 0);
 }
 #endif
 
