@@ -53,6 +53,7 @@ if(CPPCOLORLOGGER_BUILD_EXAMPLES)
 
     foreach(example_target IN LISTS EXAMPLE_TARGETS)
         add_custom_command(TARGET cppcolorlogger_run_examples POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo ""
             COMMAND ${CMAKE_COMMAND} -E echo "Running ${example_target}..."
             COMMAND $<TARGET_FILE:${example_target}>
         )

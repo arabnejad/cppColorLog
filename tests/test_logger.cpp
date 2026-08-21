@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <gtest/gtest.h>
+#include <iomanip>
 #include <memory>
 #include <new>
 #include <regex>
@@ -125,30 +126,38 @@ private:
 class StructuredSink : public LogSink {
 public:
   void write(const LogEntry &entry, const LogStyle &style) override {
-    level     = entry.level;
-    color     = style.color;
-    colorMode = style.colorMode;
-    timestamp = entry.timestamp;
-    message   = entry.message;
-    context   = entry.context;
-    fields    = entry.fields;
-    text      = entry.formattedText;
+    level      = entry.level;
+    color      = style.color;
+    colorMode  = style.colorMode;
+    timestamp  = entry.timestamp;
+    eventTime  = entry.eventTime;
+    message    = entry.message;
+    context    = entry.context;
+    sourceFile = entry.sourceFile;
+    sourceLine = entry.sourceLine;
+    threadId   = entry.threadId;
+    fields     = entry.fields;
+    text       = entry.formattedText;
   }
 
-  LogLevel    level = LogLevel::Always;
-  std::string color;
-  ColorMode   colorMode = ColorMode::Automatic;
-  std::string timestamp;
-  std::string message;
-  std::string context;
-  LogFields   fields;
-  std::string text;
+  LogLevel                              level = LogLevel::Always;
+  std::string                           color;
+  ColorMode                             colorMode = ColorMode::Automatic;
+  std::string                           timestamp;
+  std::chrono::system_clock::time_point eventTime;
+  std::string                           message;
+  std::string                           context;
+  std::string                           sourceFile;
+  unsigned                              sourceLine = 0;
+  std::string                           threadId;
+  LogFields                             fields;
+  std::string                           text;
 };
 
 class CompactLogFormatter : public LogFormatter {
 public:
-  std::string formatTimestamp(std::time_t entryTime) const override {
-    return formatTimeWithPattern(entryTime, "%H:%M:%S");
+  std::string formatTimestamp(const std::chrono::system_clock::time_point &eventTime) const override {
+    return formatTimeWithPattern(eventTime, "%H:%M:%S");
   }
 
   std::string format(const LogEntry &entry) const override {
@@ -165,6 +174,16 @@ public:
       }
       output << '}';
     }
+    return output.str();
+  }
+};
+
+class MillisecondLogFormatter : public DefaultLogFormatter {
+public:
+  std::string formatTimestamp(const std::chrono::system_clock::time_point &eventTime) const override {
+    std::ostringstream output;
+    output << formatUtcTimeWithPattern(eventTime, "%Y-%m-%dT%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
+           << millisecondsWithinSecond(eventTime) << 'Z';
     return output.str();
   }
 };
@@ -785,6 +804,72 @@ TEST(LoggerDesignTest, StructuredSinkReceivesLevelAndColor) {
   EXPECT_TRUE(sink->fields.empty());
   EXPECT_TRUE(std::regex_match(sink->timestamp, std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}")));
   EXPECT_NE(sink->text.find("Structured message"), std::string::npos);
+}
+
+TEST_F(LoggerTest, LoggingMacrosCaptureSourceAndEventMetadata) {
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  LOGGER.addSink(sink);
+  const std::chrono::system_clock::time_point beforeLog       = std::chrono::system_clock::now();
+  const unsigned                              standardLogLine = __LINE__ + 1;
+  LOGGER_LOG(LogLevel::Info, "Metadata captured");
+  const std::chrono::system_clock::time_point afterLog = std::chrono::system_clock::now();
+
+  EXPECT_EQ(sink->sourceFile, __FILE__);
+  EXPECT_EQ(sink->sourceLine, standardLogLine);
+  EXPECT_FALSE(sink->threadId.empty());
+  EXPECT_GE(sink->eventTime, beforeLog);
+  EXPECT_LE(sink->eventTime, afterLog);
+
+  const unsigned fieldsLogLine = __LINE__ + 1;
+  LOGGER_LOG_FIELDS(LogLevel::Info, "Fields metadata", {{"status", "200"}});
+  EXPECT_EQ(sink->sourceFile, __FILE__);
+  EXPECT_EQ(sink->sourceLine, fieldsLogLine);
+
+  const unsigned explicitContextLogLine = __LINE__ + 1;
+  LOGGER_LOG_WITH_CONTEXT(LogLevel::Info, "chosenContext", "Context metadata");
+  EXPECT_EQ(sink->sourceFile, __FILE__);
+  EXPECT_EQ(sink->sourceLine, explicitContextLogLine);
+}
+
+TEST(LoggerDesignTest, DirectInternalLogCallOmitsSourceLocation) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+
+  logger.log(LogLevel::Info, "No macro source");
+
+  EXPECT_TRUE(sink->sourceFile.empty());
+  EXPECT_EQ(sink->sourceLine, 0U);
+  EXPECT_FALSE(sink->threadId.empty());
+  EXPECT_NE(sink->eventTime, std::chrono::system_clock::time_point());
+}
+
+TEST(LoggerDesignTest, EntriesIdentifyTheirCreatingThread) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+
+  logger.log(LogLevel::Info, "Main thread");
+  const std::string mainThreadId = sink->threadId;
+
+  std::thread worker([&logger] { logger.log(LogLevel::Info, "Worker thread"); });
+  worker.join();
+
+  EXPECT_FALSE(mainThreadId.empty());
+  EXPECT_FALSE(sink->threadId.empty());
+  EXPECT_NE(sink->threadId, mainThreadId);
+}
+
+TEST(LoggerDesignTest, FormatterCanRenderUtcTimeWithMilliseconds) {
+  Logger                                logger(false);
+  const std::shared_ptr<StructuredSink> sink = std::make_shared<StructuredSink>();
+  logger.addSink(sink);
+  logger.setFormatter(std::make_shared<MillisecondLogFormatter>());
+
+  logger.log(LogLevel::Info, "Precise timestamp");
+
+  EXPECT_TRUE(std::regex_match(sink->timestamp,
+                               std::regex("[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}Z")));
 }
 
 TEST(LoggerDesignTest, StructuredSinkReceivesFieldsWithoutParsingText) {

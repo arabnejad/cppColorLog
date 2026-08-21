@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <iomanip>
 #include <memory>
 #include <sstream>
 
@@ -6,14 +7,18 @@
 
 class CompactLogFormatter : public LogFormatter {
 public:
-  std::string formatTimestamp(std::time_t entryTime) const override {
-    return formatTimeWithPattern(entryTime, "%H:%M:%S");
+  std::string formatTimestamp(const std::chrono::system_clock::time_point &eventTime) const override {
+    std::ostringstream output;
+    output << formatUtcTimeWithPattern(eventTime, "%H:%M:%S") << '.' << std::setfill('0') << std::setw(3)
+           << millisecondsWithinSecond(eventTime) << 'Z';
+    return output.str();
   }
 
   std::string format(const LogEntry &entry) const override {
     std::ostringstream output;
     output << entry.timestamp << ' ' << (entry.level == LogLevel::Info ? "I" : logLevelToString(entry.level)) << ' '
-           << entry.context << " | " << entry.message;
+           << entry.sourceFile << ':' << entry.sourceLine << " thread=" << entry.threadId << ' ' << entry.context
+           << " | " << entry.message;
 
     if (!entry.fields.empty()) {
       output << " {";

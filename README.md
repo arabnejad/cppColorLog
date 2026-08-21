@@ -15,6 +15,7 @@ multiple sinks, temporary settings, and thread-safe configuration and output.
 - A verbosity threshold plus an optional allowed-level list
 - Fast enabled-level checks for guarding expensive messages
 - Structured key/value fields and customizable text formatting
+- Source file, line, event time, and thread metadata
 - Exception-safe scoped settings
 - Unified automatic function and class context on GCC, Clang, and MSVC
 
@@ -480,15 +481,60 @@ field type this small makes initializer-list use predictable in C++11.
 A sink that overrides `write(const LogEntry&, const LogStyle&)` receives these
 event values separately:
 
-- `timestamp`
 - `level`
 - `message`
 - `context`
 - `fields`
+- `eventTime`, containing the original `std::chrono` time point
+- `sourceFile` and `sourceLine`
+- `threadId`
+- `timestamp`, containing the formatter-generated time text
 - `formattedText`, containing the human-readable rendering
 
 The project does not include a JSON sink. A future JSON sink should define rules
 for duplicate keys and invalid text before adding its own serializer.
+
+## Source and event metadata
+
+Every logging macro records where and when its event was created:
+
+```cpp
+LOGGER_LOG(LogLevel::Info, "Request completed");
+```
+
+Custom formatters and sinks receive the following values in `LogEntry`:
+
+| Field | Meaning |
+|---|---|
+| `eventTime` | Original `std::chrono::system_clock::time_point`, including sub-second precision. |
+| `sourceFile` | Source path captured from `__FILE__`. It may be relative or absolute depending on the build. |
+| `sourceLine` | Line captured from `__LINE__`. |
+| `threadId` | Process-unique logger thread token represented as text. It is intended for comparing events during one program run. |
+| `timestamp` | Text generated from `eventTime` by the active formatter. |
+
+`LOGGER_LOG`, `LOGGER_LOG_FIELDS`, and `LOGGER_LOG_WITH_CONTEXT` all capture the
+file and line automatically. The captured line is the line containing the
+macro. A wrapper function therefore records the macro inside the wrapper, not
+the wrapper's caller.
+
+The default formatter intentionally ignores the source file, line, and thread
+ID, so ordinary output remains unchanged. A custom formatter can include them:
+
+```cpp
+std::string format(const LogEntry &entry) const override {
+  std::ostringstream output;
+  output << '[' << logLevelToString(entry.level) << "] ["
+         << entry.sourceFile << ':' << entry.sourceLine << "] [thread="
+         << entry.threadId << "] " << entry.message;
+  return output.str();
+}
+```
+
+Example output:
+
+```text
+[INFO] [src/worker.cpp:42] [thread=7] Request completed
+```
 
 ## Custom log formatting
 
@@ -535,14 +581,33 @@ formatter to keep the standard line layout, then override `formatTimestamp()`:
 ```cpp
 class TimeOnlyLogFormatter : public DefaultLogFormatter {
 public:
-  std::string formatTimestamp(std::time_t entryTime) const override {
-    return formatTimeWithPattern(entryTime, "%H:%M:%S");
+  std::string formatTimestamp(
+      const std::chrono::system_clock::time_point &eventTime) const override {
+    return formatTimeWithPattern(eventTime, "%H:%M:%S");
   }
 };
 ```
 
 `formatTimeWithPattern()` accepts the same placeholders as `std::strftime`.
 For example, `%H:%M:%S` produces a timestamp such as `14:30:12`.
+
+Use `formatUtcTimeWithPattern()` for UTC. The `millisecondsWithinSecond()`
+helper returns the fractional value from 0 to 999; `std::setw(3)` pads it to
+three digits:
+
+```cpp
+std::string formatTimestamp(
+    const std::chrono::system_clock::time_point &eventTime) const override {
+  std::ostringstream output;
+  output << formatUtcTimeWithPattern(eventTime, "%Y-%m-%dT%H:%M:%S")
+         << '.' << std::setfill('0') << std::setw(3)
+         << millisecondsWithinSecond(eventTime) << 'Z';
+  return output.str();
+}
+```
+
+This produces a timestamp such as `2026-09-05T20:15:10.437Z`. Include
+`<iomanip>` when using `std::setfill()` and `std::setw()`.
 
 A formatter should return plain text. Destination-specific behavior remains in
 the sinks; for example, `ConsoleSink` adds color after formatting, while
@@ -736,9 +801,10 @@ public:
 LOGGER.addSink(std::make_shared<MySink>());
 ```
 
-The entry also provides the timestamp, level, original message, source context,
-and fields. The separate `LogStyle` argument contains the selected console color
-and color mode. Non-console sinks can ignore it.
+The entry also provides the raw event time, timestamp, source file, source line,
+thread ID, level, original message, source context, and fields. The separate
+`LogStyle` argument contains the selected console color and color mode.
+Non-console sinks can ignore it.
 
 If a custom formatter or sink throws an exception, the logger catches it.
 A failing sink does not prevent later sinks from receiving the same entry. Check

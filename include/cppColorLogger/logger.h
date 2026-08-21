@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -588,12 +589,16 @@ inline bool shouldUseConsoleColor(ColorMode mode, ConsoleStream stream) {
 // A log event and its formatted representation. Destination-specific settings,
 // such as console color, are provided to sinks separately through LogStyle.
 struct LogEntry {
-  LogLevel    level;         // Message severity, such as Info, Warn, or Error.
-  std::string message;       // Original message before metadata and fields are added.
-  std::string context;       // Function or qualified method name; empty when not provided.
-  LogFields   fields;        // Ordered key/value data for structured sinks.
-  std::string timestamp;     // Formatted time when the entry was created.
-  std::string formattedText; // Complete human-readable line for ordinary sinks.
+  LogLevel                              level;      // Message severity, such as Info, Warn, or Error.
+  std::string                           message;    // Original message before metadata and fields are added.
+  std::string                           context;    // Function or qualified method name; empty when not provided.
+  LogFields                             fields;     // Ordered key/value data for structured sinks.
+  std::chrono::system_clock::time_point eventTime;  // Raw creation time, available for precise custom formatting.
+  std::string                           sourceFile; // Value captured from __FILE__; empty for an internal direct call.
+  unsigned                              sourceLine; // Line captured from __LINE__; zero when no location was supplied.
+  std::string                           threadId;   // Process-unique logger thread token formatted as text.
+  std::string                           timestamp;  // Formatter-generated representation of eventTime.
+  std::string                           formattedText; // Complete human-readable line for ordinary sinks.
 };
 
 // Presentation settings selected for one log call. Most sinks can ignore this;
@@ -617,15 +622,17 @@ public:
   /** Creates the complete human-readable line stored in LogEntry::formattedText. */
   virtual std::string format(const LogEntry &entry) const = 0;
 
-  /** Creates LogEntry::timestamp before format() receives the entry. */
-  virtual std::string formatTimestamp(std::time_t entryTime) const {
-    return formatTimeWithPattern(entryTime, "%Y-%m-%d %H:%M:%S");
+  /** Creates LogEntry::timestamp from its raw event time before format(). */
+  virtual std::string formatTimestamp(const std::chrono::system_clock::time_point &eventTime) const {
+    return formatTimeWithPattern(eventTime, "%Y-%m-%d %H:%M:%S");
   }
 
 protected:
-  /** Formats a time using the same placeholders accepted by std::strftime. */
-  static std::string formatTimeWithPattern(std::time_t entryTime, const std::string &pattern) {
-    std::tm timeInfo = {};
+  /** Formats local time using the same placeholders accepted by std::strftime. */
+  static std::string formatTimeWithPattern(const std::chrono::system_clock::time_point &eventTime,
+                                           const std::string                           &pattern) {
+    const std::time_t entryTime = std::chrono::system_clock::to_time_t(eventTime);
+    std::tm           timeInfo  = {};
 #if defined(_WIN32)
     if (localtime_s(&timeInfo, &entryTime) != 0)
       return std::string();
@@ -638,6 +645,35 @@ protected:
     if (std::strftime(timestamp, sizeof(timestamp), pattern.c_str(), &timeInfo) == 0)
       return std::string();
     return timestamp;
+  }
+
+  /** Formats UTC using the same placeholders accepted by std::strftime. */
+  static std::string formatUtcTimeWithPattern(const std::chrono::system_clock::time_point &eventTime,
+                                              const std::string                           &pattern) {
+    const std::time_t entryTime = std::chrono::system_clock::to_time_t(eventTime);
+    std::tm           timeInfo  = {};
+#if defined(_WIN32)
+    if (gmtime_s(&timeInfo, &entryTime) != 0)
+      return std::string();
+#else
+    if (gmtime_r(&entryTime, &timeInfo) == nullptr)
+      return std::string();
+#endif
+
+    char timestamp[128] = {};
+    if (std::strftime(timestamp, sizeof(timestamp), pattern.c_str(), &timeInfo) == 0)
+      return std::string();
+    return timestamp;
+  }
+
+  /** Returns the millisecond component of an event time as a value from 0 to 999. */
+  static unsigned millisecondsWithinSecond(const std::chrono::system_clock::time_point &eventTime) {
+    const std::int64_t totalMilliseconds =
+        std::chrono::duration_cast<std::chrono::milliseconds>(eventTime.time_since_epoch()).count();
+    std::int64_t milliseconds = totalMilliseconds % 1000;
+    if (milliseconds < 0)
+      milliseconds += 1000;
+    return static_cast<unsigned>(milliseconds);
   }
 };
 
@@ -707,7 +743,7 @@ public:
 
   void write(const LogEntry &entry, const LogStyle &style) override {
     std::lock_guard<std::mutex> console_lck(m_console_mux);
-    std::ostream                &output = outputStream();
+    std::ostream               &output = outputStream();
     if (cppcolorlogger_detail::shouldUseConsoleColor(style.colorMode, m_stream) && !style.color.empty())
       output << style.color << entry.formattedText << Color::Reset << std::endl;
     else
@@ -716,7 +752,7 @@ public:
 
   bool flush() override {
     std::lock_guard<std::mutex> console_lck(m_console_mux);
-    std::ostream                &output = outputStream();
+    std::ostream               &output = outputStream();
     output.flush();
     return static_cast<bool>(output);
   }
@@ -1094,18 +1130,22 @@ public:
   }
 
 private:
-  template <typename T> void log(LogLevel level, const T &message, const std::string &context = "") {
-    logImpl(level, message, LogFields(), context);
+  template <typename T>
+  void log(LogLevel level, const T &message, const std::string &context = "", const char *sourceFile = nullptr,
+           unsigned sourceLine = 0) {
+    logImpl(level, message, LogFields(), context, sourceFile, sourceLine);
   }
 
   /** Logs a message with ordered key/value fields for structured sinks. */
   template <typename T>
-  void log(LogLevel level, const T &message, const LogFields &fields, const std::string &context = "") {
-    logImpl(level, message, fields, context);
+  void log(LogLevel level, const T &message, const LogFields &fields, const std::string &context = "",
+           const char *sourceFile = nullptr, unsigned sourceLine = 0) {
+    logImpl(level, message, fields, context, sourceFile, sourceLine);
   }
 
   template <typename T>
-  void logImpl(LogLevel level, const T &message, const LogFields &fields, const std::string &context) {
+  void logImpl(LogLevel level, const T &message, const LogFields &fields, const std::string &context,
+               const char *sourceFile, unsigned sourceLine) {
     // Avoid converting a disabled value to text. Expressions passed as
     // `message` have already been evaluated by the caller; use isEnabled()
     // before the call when creating the value itself is expensive.
@@ -1121,9 +1161,19 @@ private:
     LoggingDepthGuard depthGuard(loggingDepth);
 
     try {
+      LogEntry entry   = {};
+      entry.level      = level;
+      entry.context    = context;
+      entry.fields     = fields;
+      entry.eventTime  = std::chrono::system_clock::now();
+      entry.sourceFile = sourceFile == nullptr ? std::string() : sourceFile;
+      entry.sourceLine = sourceLine;
+      entry.threadId   = threadTokenToString(getCurrentThreadToken());
+
       std::ostringstream stream;
       stream << message;
-      formatAndWriteToSinks(level, stream.str(), fields, context, outputSettings);
+      entry.message = stream.str();
+      formatAndWriteToSinks(entry, outputSettings);
     } catch (const std::exception &error) {
       recordError(std::string("The log message could not be created: ") + error.what());
     } catch (...) {
@@ -1180,6 +1230,12 @@ private:
 
   static std::size_t levelIndex(LogLevel level) {
     return static_cast<std::size_t>(level);
+  }
+
+  static std::string threadTokenToString(ThreadToken threadToken) {
+    std::ostringstream output;
+    output << threadToken;
+    return output.str();
   }
 
   // Assign each thread a process-wide token the first time it uses a logger.
@@ -1263,19 +1319,12 @@ private:
     return true;
   }
 
-  void formatAndWriteToSinks(LogLevel level, const std::string &message, const LogFields &fields,
-                             const std::string &context, const OutputSettings &outputSettings) {
-    LogEntry entry = {};
-    entry.level    = level;
-    entry.message  = message;
-    entry.context  = context;
-    entry.fields   = fields;
-
+  void formatAndWriteToSinks(LogEntry &entry, const OutputSettings &outputSettings) {
     // Formatting and sink writes are serialized. This lets a formatter safely
     // keep internal state when it is used by this Logger.
     std::lock_guard<std::recursive_mutex> output_lck(m_output_mux);
     try {
-      entry.timestamp     = outputSettings.m_formatter->formatTimestamp(std::time(nullptr));
+      entry.timestamp     = outputSettings.m_formatter->formatTimestamp(entry.eventTime);
       entry.formattedText = outputSettings.m_formatter->format(entry);
     } catch (const std::exception &error) {
       recordError(std::string("The log formatter failed: ") + error.what());
@@ -1322,14 +1371,16 @@ namespace cppcolorlogger_detail {
 // Logging macros use this friend to reach Logger::log() without making direct
 // logging part of the public Logger API.
 struct LoggerLogAccess {
-  template <typename T> static void log(Logger &logger, LogLevel level, const T &message, const std::string &context) {
-    logger.log(level, message, context);
+  template <typename T>
+  static void log(Logger &logger, LogLevel level, const T &message, const std::string &context, const char *sourceFile,
+                  unsigned sourceLine) {
+    logger.log(level, message, context, sourceFile, sourceLine);
   }
 
   template <typename T>
-  static void log(Logger &logger, LogLevel level, const T &message, const LogFields &fields,
-                  const std::string &context) {
-    logger.log(level, message, fields, context);
+  static void log(Logger &logger, LogLevel level, const T &message, const LogFields &fields, const std::string &context,
+                  const char *sourceFile, unsigned sourceLine) {
+    logger.log(level, message, fields, context, sourceFile, sourceLine);
   }
 };
 
@@ -1395,7 +1446,8 @@ inline Logger &defaultLogger() {
  */
 #define LOGGER_LOG(level, message)                                                                                     \
   ::cppcolorlogger_detail::LoggerLogAccess::log(                                                                       \
-      LOGGER, level, message, ::cppcolorlogger_detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__))
+      LOGGER, level, message, ::cppcolorlogger_detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__),    \
+      __FILE__, __LINE__)
 
 /**
  * Logs a message with key/value fields and automatic source context.
@@ -1405,7 +1457,7 @@ inline Logger &defaultLogger() {
 #define LOGGER_LOG_FIELDS(level, message, ...)                                                                         \
   ::cppcolorlogger_detail::LoggerLogAccess::log(                                                                       \
       LOGGER, level, message, __VA_ARGS__,                                                                             \
-      ::cppcolorlogger_detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__))
+      ::cppcolorlogger_detail::normalizeFunctionSignature(CPPCOLORLOG_SIGNATURE, __func__), __FILE__, __LINE__)
 
 /**
  * Logs with a name chosen by the caller. Prefer this for meaningful lambda
@@ -1413,6 +1465,6 @@ inline Logger &defaultLogger() {
  * Example: LOGGER_LOG_WITH_CONTEXT(LogLevel::Info, "worker", "Task started");
  */
 #define LOGGER_LOG_WITH_CONTEXT(level, context, message)                                                               \
-  ::cppcolorlogger_detail::LoggerLogAccess::log(LOGGER, level, message, context)
+  ::cppcolorlogger_detail::LoggerLogAccess::log(LOGGER, level, message, context, __FILE__, __LINE__)
 
 #endif // CPPCOLORLOGGER_LOGGER_H
