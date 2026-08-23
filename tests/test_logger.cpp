@@ -659,6 +659,75 @@ TEST(LoggerDesignTest, PublicCustomSinkReceivesMessages) {
   EXPECT_NE(sink->messages.front().find("42"), std::string::npos);
 }
 
+TEST(LoggerDesignTest, EachSinkCanUseADifferentLogLevel) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> conciseSink  = std::make_shared<RecordingSink>();
+  const std::shared_ptr<RecordingSink> detailedSink = std::make_shared<RecordingSink>();
+  logger.setLogLevel(LogLevel::Debug);
+  logger.addSink(conciseSink, LogLevel::Info);
+  logger.addSink(detailedSink, LogLevel::Debug);
+
+  EXPECT_TRUE(logger.isEnabled(LogLevel::Debug));
+
+  logger.log(LogLevel::Debug, "Debug details");
+  logger.log(LogLevel::Info, "Request completed");
+  logger.log(LogLevel::Error, "Request failed");
+
+  ASSERT_EQ(conciseSink->messages.size(), 2U);
+  EXPECT_NE(conciseSink->messages[0].find("Request completed"), std::string::npos);
+  EXPECT_NE(conciseSink->messages[1].find("Request failed"), std::string::npos);
+  ASSERT_EQ(detailedSink->messages.size(), 3U);
+  EXPECT_NE(detailedSink->messages[0].find("Debug details"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, SinkWithoutALevelReceivesEveryGloballyEnabledMessage) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+  logger.setLogLevel(LogLevel::Verbose);
+  logger.addSink(sink);
+
+  logger.log(LogLevel::Verbose, "Verbose details");
+
+  ASSERT_EQ(sink->messages.size(), 1U);
+  EXPECT_NE(sink->messages[0].find("Verbose details"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, AllowedLevelsAreAppliedBeforePerSinkLevels) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+  logger.setLogLevel(LogLevel::Debug);
+  logger.setAllowedLevels({LogLevel::Error});
+  logger.addSink(sink, LogLevel::Debug);
+
+  logger.log(LogLevel::Debug, "Not allowed");
+  logger.log(LogLevel::Error, "Allowed error");
+
+  ASSERT_EQ(sink->messages.size(), 1U);
+  EXPECT_NE(sink->messages[0].find("Allowed error"), std::string::npos);
+}
+
+TEST(LoggerDesignTest, ScopedSettingsRestorePerSinkLevels) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> conciseSink  = std::make_shared<RecordingSink>();
+  const std::shared_ptr<RecordingSink> detailedSink = std::make_shared<RecordingSink>();
+  logger.setLogLevel(LogLevel::Debug);
+  logger.addSink(conciseSink, LogLevel::Info);
+
+  {
+    ScopedSettings settings = logger.scopedSettings();
+    logger.addSink(detailedSink, LogLevel::Debug);
+    logger.log(LogLevel::Debug, "Scoped debug details");
+  }
+
+  logger.log(LogLevel::Debug, "Debug after scope");
+  logger.log(LogLevel::Info, "Info after scope");
+
+  ASSERT_EQ(conciseSink->messages.size(), 1U);
+  EXPECT_NE(conciseSink->messages[0].find("Info after scope"), std::string::npos);
+  ASSERT_EQ(detailedSink->messages.size(), 1U);
+  EXPECT_NE(detailedSink->messages[0].find("Scoped debug details"), std::string::npos);
+}
+
 TEST(LoggerDesignTest, RemovesOnlyTheSelectedSink) {
   Logger                               logger(false);
   const std::shared_ptr<RecordingSink> removedSink   = std::make_shared<RecordingSink>();
@@ -1246,6 +1315,7 @@ TEST(LoggerDesignTest, MovedScopedSettingsRestoresItsCreatingThread) {
 
 TEST(LoggerDesignTest, DestroyingMovedOuterScopeDoesNotRemoveInnerScope) {
   Logger logger(false);
+  logger.addSink(std::make_shared<RecordingSink>());
   logger.setLogLevel(LogLevel::Info);
 
   std::unique_ptr<ScopedSettings> outer(new ScopedSettings(logger.scopedSettings()));
@@ -1265,6 +1335,7 @@ TEST(LoggerDesignTest, DestroyingMovedOuterScopeDoesNotRemoveInnerScope) {
 
 TEST(LoggerDesignTest, ScopedSettingsOutlivingAThreadCannotAffectNewThreads) {
   Logger logger(false);
+  logger.addSink(std::make_shared<RecordingSink>());
   logger.setLogLevel(LogLevel::Info);
 
   const int threadCount = 100;
@@ -1311,6 +1382,7 @@ TEST(LoggerDesignTest, AlwaysAndVerboseThresholdSemanticsArePreserved) {
 
 TEST(LoggerDesignTest, IsEnabledUsesThresholdAndAllowedLevels) {
   Logger logger(false);
+  logger.addSink(std::make_shared<RecordingSink>());
   logger.setLogLevel(LogLevel::Info);
 
   EXPECT_TRUE(logger.isEnabled(LogLevel::Error));
@@ -1348,6 +1420,21 @@ TEST(LoggerDesignTest, EnabledMessageIsNotConvertedWhenThereAreNoSinks) {
   logger.log(LogLevel::Info, StreamCountingMessage(streamCount), "noSinkTest");
 
   EXPECT_EQ(streamCount, 0);
+}
+
+TEST(LoggerDesignTest, MessageIsNotConvertedWhenEverySinkRejectsItsLevel) {
+  Logger                               logger(false);
+  const std::shared_ptr<RecordingSink> sink = std::make_shared<RecordingSink>();
+  logger.setLogLevel(LogLevel::Debug);
+  logger.addSink(sink, LogLevel::Info);
+  int streamCount = 0;
+
+  EXPECT_FALSE(logger.isEnabled(LogLevel::Debug));
+  EXPECT_TRUE(logger.isEnabled(LogLevel::Info));
+  logger.log(LogLevel::Debug, StreamCountingMessage(streamCount), "perSinkFilterTest");
+
+  EXPECT_EQ(streamCount, 0);
+  EXPECT_TRUE(sink->messages.empty());
 }
 
 TEST(LoggerDesignTest, IsEnabledAvoidsConstructingMessageForDisabledLevel) {

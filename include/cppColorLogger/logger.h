@@ -870,6 +870,24 @@ class Logger {
   typedef std::uint64_t ThreadToken;
   typedef std::uint64_t ScopeId;
 
+  // A sink's level is part of its registration, so the same sink object can be
+  // registered more than once with different limits and removal handles.
+  struct RegisteredSink {
+    RegisteredSink(const std::shared_ptr<LogSink> &registeredSink, LogLevel maximumLevel)
+        : m_sink(registeredSink), m_maximumLevel(maximumLevel) {}
+
+    // For example, an Info sink accepts Always through Info and rejects Debug
+    // and Verbose.
+    bool accepts(LogLevel messageLevel) const {
+      return messageLevel <= m_maximumLevel;
+    }
+
+    std::shared_ptr<LogSink> m_sink;
+    LogLevel                 m_maximumLevel;
+  };
+
+  typedef std::map<std::size_t, RegisteredSink> SinkMap;
+
   // All configurable values are kept together so a scoped override can copy
   // the calling thread's current configuration in one operation.
   struct Settings {
@@ -878,13 +896,13 @@ class Logger {
           m_colors{{Color::White, Color::Magenta, Color::Red, Color::Yellow, Color::Green, Color::Cyan, Color::Blue}},
           m_colorMode(ColorMode::Automatic), m_formatter(std::make_shared<DefaultLogFormatter>()) {}
 
-    LogLevel                                        m_logLevel;
-    std::set<LogLevel>                              m_allowedLevels;
-    std::array<std::string, 7>                      m_colors;
-    ColorMode                                       m_colorMode;
-    std::map<std::size_t, std::shared_ptr<LogSink>> m_sinks;
-    std::shared_ptr<InMemorySink>                   m_inMemorySink;
-    std::shared_ptr<LogFormatter>                   m_formatter;
+    LogLevel                      m_logLevel;
+    std::set<LogLevel>            m_allowedLevels;
+    std::array<std::string, 7>    m_colors;
+    ColorMode                     m_colorMode;
+    SinkMap                       m_sinks;
+    std::shared_ptr<InMemorySink> m_inMemorySink;
+    std::shared_ptr<LogFormatter> m_formatter;
   };
 
   struct ScopedSettingsEntry {
@@ -966,10 +984,15 @@ public:
    * scope, the sink is added only to that temporary settings copy.
    */
   SinkHandle addSink(const std::shared_ptr<LogSink> &sink) {
+    return addSink(sink, LogLevel::Verbose);
+  }
+
+  /** Adds a sink that receives only messages at or above its chosen severity. */
+  SinkHandle addSink(const std::shared_ptr<LogSink> &sink, LogLevel maximumLevel) {
     if (!sink)
       return SinkHandle();
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    return addSinkLocked(activeSettingsLocked(getCurrentThreadToken()), sink);
+    return addSinkLocked(activeSettingsLocked(getCurrentThreadToken()), sink, maximumLevel);
   }
 
   /**
@@ -999,13 +1022,13 @@ public:
     if (handle.m_loggerToken != m_loggerToken)
       return false;
 
-    std::lock_guard<std::mutex>                               state_lck(m_state_mux);
-    Settings                                                 &state = activeSettingsLocked(getCurrentThreadToken());
-    std::map<std::size_t, std::shared_ptr<LogSink>>::iterator sink  = state.m_sinks.find(handle.m_id);
+    std::lock_guard<std::mutex> state_lck(m_state_mux);
+    Settings                   &state = activeSettingsLocked(getCurrentThreadToken());
+    SinkMap::iterator           sink  = state.m_sinks.find(handle.m_id);
     if (sink == state.m_sinks.end())
       return false;
 
-    const bool removedMemorySink = state.m_inMemorySink && sink->second.get() == state.m_inMemorySink.get();
+    const bool removedMemorySink = state.m_inMemorySink && sink->second.m_sink.get() == state.m_inMemorySink.get();
     state.m_sinks.erase(sink);
     if (removedMemorySink && !containsSinkLocked(state, state.m_inMemorySink))
       state.m_inMemorySink.reset();
@@ -1063,7 +1086,11 @@ public:
     std::vector<std::shared_ptr<LogSink>> sinks;
     {
       std::lock_guard<std::mutex> state_lck(m_state_mux);
-      copySinksLocked(activeSettingsLocked(getCurrentThreadToken()), sinks);
+      const Settings             &state = activeSettingsLocked(getCurrentThreadToken());
+      // Keep shared ownership while flushing without the settings lock.
+      sinks.reserve(state.m_sinks.size());
+      for (SinkMap::const_iterator sink = state.m_sinks.begin(); sink != state.m_sinks.end(); ++sink)
+        sinks.push_back(sink->second.m_sink);
     }
 
     bool                                  succeeded = true;
@@ -1116,17 +1143,18 @@ public:
   /**
    * @brief Checks whether a log level is currently enabled.
    *
-   * Uses the calling thread's active threshold and allowed-level list. This only
-   * checks the current settings; it does not create or write a message. The
-   * returned value is a snapshot and can become outdated if the settings change
-   * afterward.
+   * Uses the calling thread's active threshold, allowed-level list, and sink
+   * limits. This only checks the current settings; it does not create or write
+   * a message. The returned value is a snapshot and can become outdated if the
+   * settings change afterward.
    *
    * @param level The level that a future message would use.
-   * @return True when the level passes both the threshold and allowed-level list.
+   * @return True when the level passes the logger filters and at least one sink accepts it.
    */
   bool isEnabled(LogLevel level) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
-    return acceptsLevel(activeSettingsLocked(getCurrentThreadToken()), level);
+    const Settings             &state = activeSettingsLocked(getCurrentThreadToken());
+    return acceptsLevel(state, level) && anySinkAcceptsLevelLocked(state, level);
   }
 
 private:
@@ -1204,28 +1232,57 @@ private:
     return depth;
   }
 
-  SinkHandle addSinkLocked(Settings &state, const std::shared_ptr<LogSink> &sink) {
+  SinkHandle addSinkLocked(Settings &state, const std::shared_ptr<LogSink> &sink,
+                           LogLevel maximumLevel = LogLevel::Verbose) {
     const std::size_t id = m_nextSinkId++;
     if (id == 0)
       std::abort();
-    state.m_sinks[id] = sink;
+    state.m_sinks.insert(std::make_pair(id, RegisteredSink(sink, maximumLevel)));
     return SinkHandle(m_loggerToken, id);
   }
 
   static bool containsSinkLocked(const Settings &state, const std::shared_ptr<LogSink> &wanted) {
-    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.m_sinks.begin();
-         sink != state.m_sinks.end(); ++sink) {
-      if (sink->second.get() == wanted.get())
+    for (SinkMap::const_iterator sink = state.m_sinks.begin(); sink != state.m_sinks.end(); ++sink) {
+      if (sink->second.m_sink.get() == wanted.get())
         return true;
     }
     return false;
   }
 
-  static void copySinksLocked(const Settings &state, std::vector<std::shared_ptr<LogSink>> &sinks) {
+  /**
+   * Returns true when at least one registered sink accepts `messageLevel`.
+   *
+   * `isEnabled()` uses this check to answer whether a message could reach any
+   * sink. It only checks registrations and does not copy sinks or write a
+   * message.
+   *
+   * The `Locked` suffix means the caller must already hold `m_state_mux`.
+   */
+  static bool anySinkAcceptsLevelLocked(const Settings &state, LogLevel messageLevel) {
+    for (SinkMap::const_iterator sink = state.m_sinks.begin(); sink != state.m_sinks.end(); ++sink) {
+      if (sink->second.accepts(messageLevel))
+        return true;
+    }
+    return false;
+  }
+
+  /**
+   * Copies only the registered sinks that accept `messageLevel` into `sinks`.
+   *
+   * A log call uses this helper after the message passes the logger's global
+   * threshold and allowed-level list. For example, a Debug message is copied to
+   * a Debug sink but not to an Info sink. Copying `shared_ptr`s lets the selected
+   * sinks remain alive while output occurs without holding the settings mutex.
+   *
+   * The `Locked` suffix means the caller must already hold `m_state_mux`.
+   */
+  static void copySinksAcceptingLevelLocked(const Settings &state, LogLevel messageLevel,
+                                            std::vector<std::shared_ptr<LogSink>> &sinks) {
     sinks.reserve(state.m_sinks.size());
-    for (std::map<std::size_t, std::shared_ptr<LogSink>>::const_iterator sink = state.m_sinks.begin();
-         sink != state.m_sinks.end(); ++sink)
-      sinks.push_back(sink->second);
+    for (SinkMap::const_iterator sink = state.m_sinks.begin(); sink != state.m_sinks.end(); ++sink) {
+      if (sink->second.accepts(messageLevel))
+        sinks.push_back(sink->second.m_sink);
+    }
   }
 
   static std::size_t levelIndex(LogLevel level) {
@@ -1308,14 +1365,17 @@ private:
   bool tryCaptureOutputSettings(LogLevel level, OutputSettings &outputSettings) const {
     std::lock_guard<std::mutex> state_lck(m_state_mux);
     const Settings             &state = activeSettingsLocked(getCurrentThreadToken());
-    if (!acceptsLevel(state, level) || state.m_sinks.empty())
+    if (!acceptsLevel(state, level))
+      return false;
+
+    copySinksAcceptingLevelLocked(state, level, outputSettings.m_sinks);
+    if (outputSettings.m_sinks.empty())
       return false;
 
     const std::size_t index          = levelIndex(level);
     outputSettings.m_style.color     = index < state.m_colors.size() ? state.m_colors[index] : Color::White;
     outputSettings.m_style.colorMode = state.m_colorMode;
     outputSettings.m_formatter       = state.m_formatter;
-    copySinksLocked(state, outputSettings.m_sinks);
     return true;
   }
 

@@ -169,9 +169,10 @@ if (LOGGER.isEnabled(LogLevel::Debug)) {
 }
 ```
 
-`isEnabled()` works in C++11 and newer. It returns a snapshot of the calling
-thread's settings. If those settings change after the check, `LOGGER_LOG`
-checks them again before formatting and writing the message.
+`isEnabled()` works in C++11 and newer. It checks the calling thread's logger
+filters and returns true only when at least one active sink accepts the level.
+The result is a snapshot; if settings change afterward, `LOGGER_LOG` checks
+them again before formatting and writing the message.
 
 ## Automatic source context
 
@@ -441,6 +442,52 @@ settings mutex. A log call copies `shared_ptr`s to its selected sinks before
 writing. Therefore, removing a sink while another thread is already using it is
 safe: the in-progress write may finish, and the sink is destroyed only after that
 write releases its copy.
+
+## Different log levels for different sinks
+
+The logger-level threshold controls the most detailed message that can reach
+any sink. An individual sink can then choose a less detailed limit:
+
+```cpp
+LOGGER.clearSinks();
+LOGGER.setLogLevel(LogLevel::Debug);
+
+std::shared_ptr<ConsoleSink> consoleSink =
+    std::make_shared<ConsoleSink>(ConsoleStream::Stderr);
+std::shared_ptr<FileSink> fileSink =
+    std::make_shared<FileSink>("application.log");
+
+SinkHandle consoleHandle = LOGGER.addSink(consoleSink, LogLevel::Info);
+SinkHandle fileHandle = LOGGER.addSink(fileSink, LogLevel::Debug);
+```
+
+With these settings, `Debug` messages go only to the file. `Info`, `Warn`,
+`Error`, `Fatal`, and `Always` messages go to both sinks:
+
+```cpp
+LOGGER_LOG(LogLevel::Debug, "Database query took 14 ms"); // File only
+LOGGER_LOG(LogLevel::Info, "Request completed");          // Console and file
+```
+
+Filtering happens in this order:
+
+1. `setLogLevel()` checks the logger's maximum verbosity.
+2. `setAllowedLevels()` applies the optional global allowed-level list.
+3. Each remaining sink checks its own maximum verbosity.
+
+The logger level must therefore be at least as detailed as the most verbose
+sink. A `Debug` sink cannot receive `Debug` messages while the logger itself is
+set to `Info`.
+
+Calling `addSink(sink)` without a level preserves the normal behavior: that
+sink receives every message accepted by the global logger filters. Sink levels
+belong to registrations, so removal continues to use the returned handle. They
+are also copied and restored by `ScopedSettings`.
+
+`isEnabled(level)` returns false when no active sink accepts the level. This
+means it can still safely guard expensive message construction. During logging,
+eligible sink `shared_ptr`s are copied while the settings mutex is held, so
+concurrent sink removal remains safe.
 
 ## Structured logging fields
 
