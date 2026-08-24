@@ -3,8 +3,10 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <ctime>
@@ -75,7 +77,7 @@ enum class ConsoleStream { Stdout, Stderr };
 enum class FileOpenMode { Append, Truncate };
 
 // AfterEachEntry immediately flushes every log entry. Manual leaves flushing
-// to FileSink::flush(), Logger::flushAllSinks(), or normal stream closure.
+// to the file sink's flush(), Logger::flushAllSinks(), or normal stream closure.
 enum class FileFlushMode { AfterEachEntry, Manual };
 
 // A vector keeps fields in the order supplied by the caller. Using strings for
@@ -835,6 +837,202 @@ private:
   std::string        m_lastError;
 };
 
+/**
+ * Starts a new log file when the current file reaches a chosen size.
+ *
+ * The current file keeps the requested name, such as `application.log`. During
+ * rotation, the sink renames it to `application.log.1`, moves the previous
+ * `.1` file to `.2`, and continues the same pattern for older backups. It then
+ * creates a new, empty `application.log`.
+ *
+ * Rotation happens before writing a complete entry that would cross the size
+ * limit. A log entry is never divided between files. If one entry is larger
+ * than the limit by itself, the sink keeps it complete and allows that file to
+ * exceed the limit.
+ */
+class RotatingFileSink : public LogSink {
+public:
+  /**
+   * Opens a rotating log file and adds new entries to its existing content.
+   *
+   * The default size limit is 10 MiB and the default backup count is three.
+   * Set backupFileCount to zero to discard old content during rotation instead
+   * of creating numbered backup files. A zero size limit is invalid.
+   *
+   * @param filename Name of the current log file.
+   * @param maximumFileSizeBytes Size that triggers rotation, measured in bytes.
+   * @param backupFileCount Maximum number of numbered backup files to keep.
+   * @param flushMode Whether each entry is flushed immediately or manually.
+   */
+  explicit RotatingFileSink(const std::string &filename, std::size_t maximumFileSizeBytes = 10u * 1024u * 1024u,
+                            std::size_t backupFileCount = 3, FileFlushMode flushMode = FileFlushMode::AfterEachEntry)
+      : m_filename(filename), m_maximumFileSizeBytes(maximumFileSizeBytes), m_backupFileCount(backupFileCount),
+        m_currentFileSizeBytes(0), m_flushMode(flushMode) {
+    if (m_maximumFileSizeBytes == 0) {
+      m_lastError = "Maximum log file size must be greater than zero.";
+      return;
+    }
+    openCurrentFileLocked(FileOpenMode::Append);
+  }
+
+  void write(const LogEntry &entry, const LogStyle &) override {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    if (!m_lastError.empty())
+      return;
+
+    const std::size_t entrySizeBytes = entry.formattedText.size() + 1;
+    if (shouldRotateBeforeWritingLocked(entrySizeBytes) && !rotateFilesLocked())
+      return;
+
+    m_file << entry.formattedText << '\n';
+    if (m_flushMode == FileFlushMode::AfterEachEntry)
+      m_file.flush();
+    if (!m_file) {
+      rememberFirstErrorLocked("Failed to write to rotating log file '" + m_filename + "'.");
+      return;
+    }
+    m_currentFileSizeBytes += entrySizeBytes;
+  }
+
+  /** Flushes buffered output and reports whether the operation succeeded. */
+  bool flush() override {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    if (!m_lastError.empty())
+      return false;
+
+    m_file.flush();
+    if (!m_file) {
+      rememberFirstErrorLocked("Failed to flush rotating log file '" + m_filename + "'.");
+      return false;
+    }
+    return true;
+  }
+
+  bool isOpen() const {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return m_file.is_open();
+  }
+
+  /** Returns true after an open, write, flush, or rotation operation fails. */
+  bool hasError() const {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return !m_lastError.empty();
+  }
+
+  /** Returns a copy of the first error reported by this sink. */
+  std::string getLastError() const {
+    std::lock_guard<std::mutex> file_lck(m_file_mux);
+    return m_lastError;
+  }
+
+private:
+  // A name ending in "Locked" means m_file_mux must already be locked.
+  bool shouldRotateBeforeWritingLocked(std::size_t nextEntrySizeBytes) const {
+    if (m_currentFileSizeBytes == 0)
+      return false;
+    if (m_currentFileSizeBytes >= m_maximumFileSizeBytes)
+      return true;
+    return nextEntrySizeBytes > m_maximumFileSizeBytes - m_currentFileSizeBytes;
+  }
+
+  bool rotateFilesLocked() {
+    m_file.flush();
+    if (!m_file) {
+      rememberFirstErrorLocked("Failed to flush rotating log file '" + m_filename + "' before rotation.");
+      return false;
+    }
+    m_file.close();
+
+    if (m_backupFileCount > 0 && !shiftBackupFilesLocked())
+      return false;
+
+    return openCurrentFileLocked(FileOpenMode::Truncate);
+  }
+
+  bool shiftBackupFilesLocked() {
+    for (std::size_t backupNumber = m_backupFileCount; backupNumber > 1; --backupNumber) {
+      const std::string olderBackup = makeBackupFilename(backupNumber);
+      if (!removeFileIfItExistsLocked(olderBackup))
+        return false;
+
+      const std::string newerBackup = makeBackupFilename(backupNumber - 1);
+      if (!renameFileIfItExistsLocked(newerBackup, olderBackup))
+        return false;
+    }
+
+    const std::string newestBackup = makeBackupFilename(1);
+    if (!removeFileIfItExistsLocked(newestBackup))
+      return false;
+    if (std::rename(m_filename.c_str(), newestBackup.c_str()) != 0) {
+      rememberFirstErrorLocked("Failed to rotate log file '" + m_filename + "' to '" + newestBackup + "'.");
+      return false;
+    }
+    return true;
+  }
+
+  bool removeFileIfItExistsLocked(const std::string &filename) {
+    errno = 0;
+    if (std::remove(filename.c_str()) == 0 || errno == ENOENT)
+      return true;
+    rememberFirstErrorLocked("Failed to remove old rotated log file '" + filename + "'.");
+    return false;
+  }
+
+  bool renameFileIfItExistsLocked(const std::string &currentFilename, const std::string &newFilename) {
+    errno = 0;
+    if (std::rename(currentFilename.c_str(), newFilename.c_str()) == 0 || errno == ENOENT)
+      return true;
+    rememberFirstErrorLocked("Failed to rotate log file '" + currentFilename + "' to '" + newFilename + "'.");
+    return false;
+  }
+
+  bool openCurrentFileLocked(FileOpenMode openMode) {
+    m_file.clear();
+    const std::ios::openmode streamOpenMode =
+        std::ios::out | std::ios::binary | (openMode == FileOpenMode::Append ? std::ios::app : std::ios::trunc);
+    m_file.open(m_filename.c_str(), streamOpenMode);
+    if (!m_file.is_open()) {
+      rememberFirstErrorLocked("Failed to open rotating log file '" + m_filename + "'.");
+      return false;
+    }
+
+    if (openMode == FileOpenMode::Truncate) {
+      m_currentFileSizeBytes = 0;
+      return true;
+    }
+
+    m_file.seekp(0, std::ios::end);
+    const std::streampos endOfFile = m_file.tellp();
+    if (endOfFile == std::streampos(-1)) {
+      rememberFirstErrorLocked("Failed to determine the size of rotating log file '" + m_filename + "'.");
+      m_file.close();
+      return false;
+    }
+    m_currentFileSizeBytes = static_cast<std::size_t>(endOfFile);
+    return true;
+  }
+
+  std::string makeBackupFilename(std::size_t backupNumber) const {
+    std::ostringstream filename;
+    filename << m_filename << '.' << backupNumber;
+    return filename.str();
+  }
+
+  void rememberFirstErrorLocked(const std::string &error) {
+    if (m_lastError.empty())
+      m_lastError = error;
+  }
+
+  mutable std::mutex m_file_mux;
+  std::ofstream      m_file;
+  std::string        m_filename;
+  std::size_t        m_maximumFileSizeBytes;
+  std::size_t        m_backupFileCount;
+  std::size_t        m_currentFileSizeBytes;
+  FileFlushMode      m_flushMode;
+  std::string        m_lastError;
+};
+
 class InMemorySink : public LogSink {
 public:
   void write(const LogEntry &entry, const LogStyle &) override {
@@ -1052,6 +1250,21 @@ public:
   std::shared_ptr<FileSink> addFileSink(const std::string &filename, FileOpenMode openMode = FileOpenMode::Append,
                                         FileFlushMode flushMode = FileFlushMode::AfterEachEntry) {
     const std::shared_ptr<FileSink> sink = std::make_shared<FileSink>(filename, openMode, flushMode);
+    addSink(sink);
+    return sink;
+  }
+
+  /**
+   * Adds a rotating file sink and returns it for error checks and flushing.
+   *
+   * The defaults start a new file at 10 MiB and keep three numbered backups.
+   */
+  std::shared_ptr<RotatingFileSink> addRotatingFileSink(const std::string &filename,
+                                                        std::size_t        maximumFileSizeBytes = 10u * 1024u * 1024u,
+                                                        std::size_t        backupFileCount      = 3,
+                                                        FileFlushMode      flushMode = FileFlushMode::AfterEachEntry) {
+    const std::shared_ptr<RotatingFileSink> sink =
+        std::make_shared<RotatingFileSink>(filename, maximumFileSizeBytes, backupFileCount, flushMode);
     addSink(sink);
     return sink;
   }

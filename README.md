@@ -350,9 +350,83 @@ Depending on the operating system, deleting or renaming an open file may not
 cause an immediate failure because the process can still own an open file
 handle. Errors are reported when the operating system rejects a write or flush.
 
-Built-in size-based and time-based rotation are not enabled. Applications that
-need rotation can provide a custom `LogSink`; each `write()` call receives one
-complete log entry.
+### Size-based file rotation
+
+`RotatingFileSink` stops one log file from growing forever. When the current
+file reaches a chosen size, the sink moves it to a numbered backup and starts a
+new file. The normal `FileSink` remains unchanged for applications that do not
+need rotation.
+
+The simplest use accepts the defaults: rotate at 10 MiB and keep three backup
+files.
+
+```cpp
+std::shared_ptr<RotatingFileSink> rotating_file_sink =
+    LOGGER.addRotatingFileSink("application.log");
+```
+
+To choose your own limits, pass the maximum size in bytes followed by the number
+of backup files to keep:
+
+```cpp
+const std::size_t maximum_file_size = 50u * 1024u * 1024u; // 50 MiB
+
+std::shared_ptr<RotatingFileSink> rotating_file_sink =
+    LOGGER.addRotatingFileSink("application.log", maximum_file_size, 5);
+```
+
+The files are named:
+
+```text
+application.log      current entries
+application.log.1    newest backup
+application.log.2    next older backup
+...
+application.log.5    oldest retained backup
+```
+
+When rotation is needed, the sink performs these steps:
+
+1. Finish writing and close `application.log`.
+2. Move each existing backup to the next number.
+3. Rename `application.log` to `application.log.1`.
+4. Open a new, empty `application.log`.
+
+The size is a rotation point rather than an absolute cap. The sink rotates
+before writing an entry that would cross the limit, and it never splits an
+entry between files. Therefore, one unusually large entry can produce a file
+larger than the chosen size.
+
+Content already in `application.log` is kept and counts toward the size. Set
+the backup count to zero when old content should be discarded during rotation
+instead of saved in numbered files. A maximum size of zero is invalid; check
+`hasError()` and `getLastError()` to detect it.
+
+Automatic flushing remains the default. Manual flushing is also available:
+
+```cpp
+std::shared_ptr<RotatingFileSink> rotating_file_sink =
+    LOGGER.addRotatingFileSink(
+        "application.log",
+        50u * 1024u * 1024u,
+        5,
+        FileFlushMode::Manual);
+
+LOGGER_LOG(LogLevel::Info, "Buffered entry");
+
+if (!rotating_file_sink->flush())
+  std::cerr << rotating_file_sink->getLastError() << '\n';
+```
+
+The sink uses the same close, rename, and reopen sequence on Linux, macOS, and
+Windows. The operating system can still reject a rename. For example, this can
+happen on Windows if another program has locked the log file. After any open,
+write, flush, or rotation failure, the sink remembers the first error and
+ignores later writes. The application can inspect the error and replace the
+failed sink.
+
+Rotation is based on file size, not time. Applications needing daily rotation,
+compression, or operating-system logging can still provide a custom `LogSink`.
 
 ## Adding and removing sinks
 
@@ -865,10 +939,11 @@ if (LOGGER.hasError()) {
 ```
 
 `FileSink::getLastError()` reports file open, write, and flush failures for one
-file. `Logger::getLastError()` reports failures thrown by custom formatters or
-sinks. The logger also stops a recursive logging chain after eight nested calls.
-This protects an application when a custom sink accidentally calls the same
-logger from its `write()` method.
+file. `RotatingFileSink::getLastError()` also reports rotation failures.
+`Logger::getLastError()` reports failures thrown by custom formatters or sinks.
+The logger also stops a recursive logging chain after eight nested calls. This
+protects an application when a custom sink accidentally calls the same logger
+from its `write()` method.
 
 ## CMake integration
 

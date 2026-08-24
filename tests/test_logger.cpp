@@ -69,7 +69,7 @@ protected:
   std::unique_ptr<ScopedSettings> m_testSettings;
 
   void SetUp() override {
-    std::remove(logFile.c_str());
+    removeTestLogFiles();
     m_testSettings.reset(new ScopedSettings(LOGGER));
     LOGGER.setLogLevel(LogLevel::Info);
     LOGGER.clearAllowedLevels();
@@ -81,14 +81,35 @@ protected:
     std::cout.rdbuf(oldCout);
     std::cerr.rdbuf(oldCerr);
     m_testSettings.reset();
-    std::remove(logFile.c_str());
+    removeTestLogFiles();
   }
 
-  std::string readFile() const {
-    std::ifstream     file(logFile.c_str());
+  std::string readFile(const std::string &filename) const {
+    std::ifstream     file(filename.c_str(), std::ios::binary);
     std::stringstream buffer;
     buffer << file.rdbuf();
     return buffer.str();
+  }
+
+  std::string readFile() const {
+    return readFile(logFile);
+  }
+
+  std::string backupFilename(std::size_t backupNumber) const {
+    std::ostringstream filename;
+    filename << logFile << '.' << backupNumber;
+    return filename.str();
+  }
+
+  bool fileExists(const std::string &filename) const {
+    std::ifstream file(filename.c_str(), std::ios::binary);
+    return file.good();
+  }
+
+  void removeTestLogFiles() {
+    std::remove(logFile.c_str());
+    for (std::size_t index = 1; index <= 4; ++index)
+      std::remove(backupFilename(index).c_str());
   }
 };
 
@@ -428,6 +449,102 @@ TEST_F(LoggerTest, FileSinkReportsOpenFailureAndKeepsFirstError) {
   sink.write(makeFormattedEntry("Ignored after open failure"), LogStyle());
   EXPECT_FALSE(sink.flush());
   EXPECT_EQ(sink.getLastError(), openError);
+}
+
+TEST_F(LoggerTest, RotatingFileSinkMovesCompleteEntriesBeforeWritingTheNextOne) {
+  RotatingFileSink sink(logFile, 6, 2);
+  ASSERT_TRUE(sink.isOpen());
+
+  sink.write(makeFormattedEntry("one"), LogStyle());
+  sink.write(makeFormattedEntry("two"), LogStyle());
+
+  EXPECT_EQ(readFile(), "two\n");
+  EXPECT_EQ(readFile(backupFilename(1)), "one\n");
+  EXPECT_FALSE(fileExists(backupFilename(2)));
+  EXPECT_FALSE(sink.hasError());
+}
+
+TEST_F(LoggerTest, RotatingFileSinkKeepsOnlyTheConfiguredNumberOfBackups) {
+  RotatingFileSink sink(logFile, 6, 2);
+  ASSERT_TRUE(sink.isOpen());
+
+  sink.write(makeFormattedEntry("one"), LogStyle());
+  sink.write(makeFormattedEntry("two"), LogStyle());
+  sink.write(makeFormattedEntry("three"), LogStyle());
+  sink.write(makeFormattedEntry("four"), LogStyle());
+
+  EXPECT_EQ(readFile(), "four\n");
+  EXPECT_EQ(readFile(backupFilename(1)), "three\n");
+  EXPECT_EQ(readFile(backupFilename(2)), "two\n");
+  EXPECT_FALSE(fileExists(backupFilename(3)));
+  EXPECT_FALSE(sink.hasError());
+}
+
+TEST_F(LoggerTest, RotatingFileSinkIncludesExistingContentInItsSizeCheck) {
+  {
+    std::ofstream existingFile(logFile.c_str(), std::ios::binary | std::ios::trunc);
+    existingFile << "old\n";
+  }
+
+  RotatingFileSink sink(logFile, 6, 1);
+  ASSERT_TRUE(sink.isOpen());
+  sink.write(makeFormattedEntry("new"), LogStyle());
+
+  EXPECT_EQ(readFile(), "new\n");
+  EXPECT_EQ(readFile(backupFilename(1)), "old\n");
+}
+
+TEST_F(LoggerTest, RotatingFileSinkNeverSplitsAnOversizedEntry) {
+  RotatingFileSink sink(logFile, 5, 1);
+  ASSERT_TRUE(sink.isOpen());
+
+  sink.write(makeFormattedEntry("oversized"), LogStyle());
+  EXPECT_EQ(readFile(), "oversized\n");
+  EXPECT_FALSE(fileExists(backupFilename(1)));
+
+  sink.write(makeFormattedEntry("next"), LogStyle());
+  EXPECT_EQ(readFile(), "next\n");
+  EXPECT_EQ(readFile(backupFilename(1)), "oversized\n");
+}
+
+TEST_F(LoggerTest, RotatingFileSinkCanDiscardOldContentWithoutKeepingBackups) {
+  RotatingFileSink sink(logFile, 6, 0);
+  ASSERT_TRUE(sink.isOpen());
+
+  sink.write(makeFormattedEntry("one"), LogStyle());
+  sink.write(makeFormattedEntry("two"), LogStyle());
+
+  EXPECT_EQ(readFile(), "two\n");
+  EXPECT_FALSE(fileExists(backupFilename(1)));
+}
+
+TEST_F(LoggerTest, RotatingFileSinkSupportsManualFlushing) {
+  Logger                                  logger(false);
+  const std::shared_ptr<RotatingFileSink> sink = logger.addRotatingFileSink(logFile, 12, 1, FileFlushMode::Manual);
+  ASSERT_TRUE(sink->isOpen());
+
+  logger.log(LogLevel::Info, "Buffered rotating entry", "rotationTest");
+  ASSERT_TRUE(logger.flushAllSinks());
+
+  EXPECT_NE(readFile().find("Buffered rotating entry"), std::string::npos);
+  EXPECT_FALSE(sink->hasError());
+}
+
+TEST_F(LoggerTest, RotatingFileSinkRejectsAZeroSizeLimit) {
+  RotatingFileSink sink(logFile, 0, 1);
+
+  EXPECT_FALSE(sink.isOpen());
+  EXPECT_TRUE(sink.hasError());
+  EXPECT_NE(sink.getLastError().find("greater than zero"), std::string::npos);
+}
+
+TEST_F(LoggerTest, RotatingFileSinkReportsOpenFailure) {
+  const std::string invalidPath = logFile + "/cannot-open.log";
+  RotatingFileSink  sink(invalidPath, 100, 1);
+
+  EXPECT_FALSE(sink.isOpen());
+  EXPECT_TRUE(sink.hasError());
+  EXPECT_NE(sink.getLastError().find("Failed to open"), std::string::npos);
 }
 
 #if defined(__linux__)
