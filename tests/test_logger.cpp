@@ -1203,7 +1203,7 @@ TEST(LoggerDesignTest, FormatterUseIsSerializedAcrossThreads) {
   const int                messagesPerThread = 50;
   std::vector<std::thread> threads;
   for (int threadIndex = 0; threadIndex < threadCount; ++threadIndex) {
-    threads.push_back(std::thread([&logger] {
+    threads.push_back(std::thread([&logger, messagesPerThread] {
       for (int messageIndex = 0; messageIndex < messagesPerThread; ++messageIndex)
         logger.log(LogLevel::Info, "message");
     }));
@@ -1226,7 +1226,7 @@ TEST(LoggerDesignTest, FormatterCanBeReplacedWhileAnotherThreadLogs) {
   const int                           messageCount = 200;
   logger.setFormatter(compactFormatter);
 
-  std::thread loggingThread([&logger, &loggingStarted] {
+  std::thread loggingThread([&logger, &loggingStarted, messageCount] {
     loggingStarted.store(true);
     for (int messageIndex = 0; messageIndex < messageCount; ++messageIndex)
       logger.log(LogLevel::Info, "Concurrent message", "writer");
@@ -1734,7 +1734,7 @@ TEST(LoggerDesignTest, MemorySinkIsSafeForConcurrentLogging) {
   const int                messagesPerThread = 100;
   std::vector<std::thread> threads;
   for (int thread = 0; thread < threadCount; ++thread) {
-    threads.push_back(std::thread([&logger]() {
+    threads.push_back(std::thread([&logger, messagesPerThread]() {
       for (int message = 0; message < messagesPerThread; ++message)
         logger.log(LogLevel::Debug, message, "worker");
     }));
