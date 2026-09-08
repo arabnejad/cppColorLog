@@ -45,7 +45,7 @@ jobs:
           CXXFLAGS=-std=c++11
 
   windows-build-and-test:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -57,7 +57,7 @@ jobs:
 
       - name: Configure project
         run: >-
-          cmake -S . -B build
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
           -DCPPCOLORLOGGER_BUILD_TESTS=ON
           -DCPPCOLORLOGGER_BUILD_EXAMPLES=ON
           -DCMAKE_CXX_STANDARD=11
