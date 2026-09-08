@@ -285,7 +285,7 @@ Application code should use the public macros and should not call the parser
 helpers directly.
 
 If you want to understand or change the implementation, read
-[`contribution.md`](../contribution.md). It explains:
+[`CONTRIBUTING.md`](../CONTRIBUTING.md). It explains:
 
 - Why the parser is needed.
 - What every helper does and why it exists.

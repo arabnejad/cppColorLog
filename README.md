@@ -232,7 +232,7 @@ template, lambda, compiler-fallback, and parser examples are kept in the
 example is
 [`examples/04_source_context/source_context.cpp`](examples/04_source_context/source_context.cpp).
 Developers changing the parser should also read
-[`contribution.md`](contribution.md), which explains the purpose and reference
+[`CONTRIBUTING.md`](CONTRIBUTING.md), which explains the purpose and reference
 basis of every parser helper.
 
 ## File and memory sinks
