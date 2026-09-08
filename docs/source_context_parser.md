@@ -1,12 +1,26 @@
-# Understanding automatic source context
+# Using automatic source context
 
-This guide is for developers who want to use cppColorLogger and then understand
-how its automatic function names work internally.
+Source context is the function or method name shown beside a log message:
 
-## If you only want to use the logger
+```text
+[INFO] [Service::start] Service started
+        ^^^^^^^^^^^^^^
+        source context
+```
 
-You do not need to call any internal source-context parser function. For normal
-code, use `LOGGER_LOG`:
+cppColorLogger can detect this name for you. In normal application code, you
+do not need to understand or call the internal parser.
+
+## The three rules to remember
+
+1. Use `LOGGER_LOG(level, message)` for normal functions, methods,
+   constructors, destructors, operators, and templates.
+2. Use `LOGGER_LOG_WITH_CONTEXT(level, context, message)` when you want to
+   choose the context yourself.
+3. Do not call anything in `cppcolorlogger_detail`. Those functions are
+   implementation details used by the logging macros.
+
+## Quick start
 
 ```cpp
 #include "cppColorLogger/logger.h"
@@ -24,6 +38,7 @@ public:
 
 int main() {
   LOGGER.setLogLevel(LogLevel::Info);
+
   refreshCache();
 
   Service service;
@@ -31,44 +46,30 @@ int main() {
 }
 ```
 
-The logger automatically adds a **source context** to each message:
+Output:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [refreshCache] Cache refreshed
 [2026-09-05 00:59:52] [INFO] [Service::start] Service started
 ```
 
-The complete runnable source-context demonstration is
-[`examples/04_source_context/source_context.cpp`](../examples/04_source_context/source_context.cpp).
+The timestamp will be different when you run the program.
 
-Follow these three rules:
+## Runnable example
 
-1. Use `LOGGER_LOG(level, message)` in normal functions, class methods,
-   constructors, destructors, operators, and templates.
-2. Use `LOGGER_LOG_WITH_CONTEXT(level, context, message)` when a lambda needs a
-   useful name or when the context must be exactly the same on every compiler.
-3. Do not call the internal parser functions from application code. They are
-   private implementation helpers used by the logging macros.
+The project contains a complete example:
 
-If that is all you need, you can stop reading here. The remaining sections
-explain the parser implementation inside the single
-`include/cppColorLogger/logger.h` header.
+[`examples/04_source_context/source_context.cpp`](../examples/04_source_context/source_context.cpp)
 
-## Runnable examples for all supported cases
-
-The project includes
-[`examples/04_source_context/source_context.cpp`](../examples/04_source_context/source_context.cpp).
-It uses the real public macros rather than calling the parser directly. Build
-and run it from the project root:
+Build and run it from the project root:
 
 ```sh
 make examples
 ./build/source_context
 ```
 
-The following output was produced by GCC 13.3. The timestamp changes on every
-run. A terminal may display these INFO lines in green; invisible ANSI color
-codes are not shown below.
+This output was produced with GCC 13.3. A terminal may show INFO messages in
+green; ANSI color codes are not displayed below.
 
 ```text
 Source context: automatic and explicit names.
@@ -86,10 +87,9 @@ Source context: automatic and explicit names.
 [2026-09-05 01:10:14] [INFO] [Service::~Service] Destructor
 ```
 
-This table connects each C++ situation to the source context inside the third
-pair of square brackets:
+The example and automated tests verify these contexts:
 
-| C++ situation | Macro to use | Verified context |
+| Where the log is written | Macro | Context in the output |
 | --- | --- | --- |
 | Free function | `LOGGER_LOG` | `refreshCache` |
 | Constructor | `LOGGER_LOG` | `Service::Service` |
@@ -100,188 +100,16 @@ pair of square brackets:
 | Function template | `LOGGER_LOG` | `process<int>` |
 | Class template | `LOGGER_LOG` | `Repository<User>::save` |
 | Class and member templates | `LOGGER_LOG` | `Repository<User>::convert<std::pair<int, double>>` |
-| Lambda with automatic context | `LOGGER_LOG` | `<lambda>` |
-| Lambda with a chosen name | `LOGGER_LOG_WITH_CONTEXT` | `refreshCache` |
-| Stable/private explicit name | `LOGGER_LOG_WITH_CONTEXT` | `UserRepository::save` |
+| Lambda, automatic name | `LOGGER_LOG` | `<lambda>` |
+| Lambda, chosen name | `LOGGER_LOG_WITH_CONTEXT` | `refreshCache` |
+| Any chosen name | `LOGGER_LOG_WITH_CONTEXT` | For example, `UserRepository::save` |
 
-## Words used in the parser
+## Templates
 
-The parser comments use a few C++ terms:
+You do not need to configure anything before logging from a template. Use
+`LOGGER_LOG` in the same way as you would in an ordinary function.
 
-| Term | Plain-English meaning | Example |
-| --- | --- | --- |
-| Source context | The function or method name printed with a log message. | `Service::start` |
-| Function signature | A compiler-generated description containing the return type, function name, and arguments. | `void Service::start(int)` |
-| Qualified name | A name that includes its class or namespace. | `Service::start` |
-| Identifier | One simple C++ name made from letters, digits, and `_`. | `T`, `User`, `value_type` |
-| Template placeholder | A name waiting to be replaced by a real type. | `T` in `Repository<T>` |
-| Template binding | A placeholder together with its resolved type. | `T = User` |
-| Parser | Code that reads a string and extracts the useful pieces. | `normalizeFunctionSignature` |
-
-## What happens when `LOGGER_LOG` is called
-
-Consider this method:
-
-```cpp
-void Service::start() {
-  LOGGER_LOG(LogLevel::Info, "Service started");
-}
-```
-
-The call travels through the header in this order:
-
-```text
-LOGGER_LOG
-    |
-    | passes the detailed compiler signature and __func__ fallback
-    v
-cppcolorlogger_detail::normalizeFunctionSignature
-    |
-    | removes information that is not useful in the log
-    v
-"Service::start"
-    |
-    v
-Logger::log -> final log entry
-```
-
-On GCC, the macro passes these two values to the parser:
-
-```text
-detailed signature = "void Service::start()"
-fallback function  = "start"
-```
-
-The detailed signature contains the class name, so the parser uses it when it
-can. The fallback comes from standard `__func__` and supplies the simpler name
-`start` if the detailed signature cannot be understood. No temporary source
-object is needed; the parser's returned string is passed directly to
-`Logger::log()`.
-
-The final logger output for this call is:
-
-```text
-[2026-09-05 00:59:52] [INFO] [Service::start] Service started
-```
-
-## The parser, one step at a time
-
-`normalizeFunctionSignature` is the main parser function. The other functions
-in `detail` help it complete four steps.
-
-### Step 1: clean the input
-
-`trim` removes whitespace only from the beginning and end:
-
-```text
-Input to trim:    "  void Service::start()  "
-Returned string:  "void Service::start()"
-```
-
-It does not change spaces in the middle of the signature.
-
-`trim` is only an internal preparation step. It does not write a log by itself.
-After the complete parser runs, the corresponding logger output is still:
-
-```text
-[2026-09-05 00:59:52] [INFO] [Service::start] Member function
-```
-
-### Step 2: separate template information
-
-For an ordinary function, there may be no extra work:
-
-```text
-void Service::start()
-```
-
-For a template, GCC or Clang may add resolved types at the end:
-
-```text
-void process(const T&) [with T = int]
-                       ^^^^^^^^^^^^^^
-                       template suffix
-```
-
-`removeTemplateSuffix` changes this into two separate pieces:
-
-```text
-signature after removal = "void process(const T&)"
-bindings                = [{ name: "T", value: "int" }]
-```
-
-The function changes its `signature` argument directly. This is why that
-argument is passed as `std::string &` instead of `const std::string &`.
-
-When several bindings exist, `splitTemplateBindings` separates them. Splitting
-on every comma would be incorrect because a type can contain its own comma:
-
-```text
-Input:  "U = std::pair<int, int>, T = User"
-
-Correct output:
-  1. "U = std::pair<int, int>"
-  2. "T = User"
-
-Incorrect output:
-  1. "U = std::pair<int"
-  2. "int>"
-  3. "T = User"
-```
-
-The function avoids the incorrect result by counting open `< >`, `( )`,
-`[ ]`, and `{ }` pairs. A comma separates bindings only when all counts are
-zero, meaning the comma is not nested inside a type or expression.
-
-`isIdentifier` checks that the left side of a binding is a safe, simple name.
-For example, `T` is accepted but `std::T` is rejected.
-
-These helpers do not log separately. For the `process<int>` example, their work
-contributes to this final logger line:
-
-```text
-[2026-09-05 00:59:52] [INFO] [process<int>] Function template
-```
-
-### Step 3: extract the callable name
-
-`extractFunctionName` removes the return type and argument types:
-
-```text
-Input to parser: "void Service::start(int)"
-Parser result:   "Service::start"
-```
-
-It first finds the final `)`, then searches backward for the matching `(`.
-Everything after that opening parenthesis is the argument list and can be
-removed. From the remaining text, the last top-level name is the callable.
-
-Operators need special handling because their name can contain punctuation or
-spaces:
-
-```text
-"bool Predicate::operator()(int)"       -> "Predicate::operator()"
-"public: bool Value::operator bool()"   -> "Value::operator bool"
-```
-
-`findNameStart` supports this case. It searches backward to find where the
-class-and-operator name begins without stopping at a space inside an operator
-or a nested template.
-
-Lambdas also need special handling. Their compiler-generated names differ, so
-the parser converts them all to the stable text `<lambda>`.
-
-The runnable example verifies ordinary methods and operators with these logger
-lines:
-
-```text
-[2026-09-05 00:59:52] [INFO] [Service::start] Member function
-[2026-09-05 00:59:52] [INFO] [Service::operator()] Function-call operator
-```
-
-### Step 4: put resolved template types into the name
-
-For a free function template:
+### Function template
 
 ```cpp
 #include "cppColorLogger/logger.h"
@@ -293,27 +121,17 @@ void process(const T &) {
 
 int main() {
   LOGGER.setLogLevel(LogLevel::Info);
-  process(42); // T is int
+  process(42);
 }
 ```
 
-The compiler signature and parser result can look like this:
-
-```text
-Compiler: void process(const T&) [with T = int]
-Log name: process<int>
-```
-
-The callable name does not contain `T`, so the parser adds the resolved type as
-a function-template argument: `<int>`.
-
-The complete logger output is:
+The call uses `int`, so the context contains `process<int>`:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [process<int>] Function template
 ```
 
-A class template is slightly different:
+### Class template
 
 ```cpp
 #include "cppColorLogger/logger.h"
@@ -335,41 +153,13 @@ int main() {
 }
 ```
 
-GCC may provide:
-
-```text
-void Repository<T>::save(const T&) [with T = User]
-```
-
-`replaceIdentifier` replaces the complete `T` token in `Repository<T>`:
-
-```text
-Repository<T>::save  ->  Repository<User>::save
-```
-
-It replaces complete names only. Replacing `T` must not accidentally change a
-longer name such as `Type`.
-
-The verified logger output for `Repository<User>::save` is:
+Output:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [Repository<User>::save] Class template
 ```
 
-Clang sometimes already places the resolved type in the class name while also
-reporting the binding:
-
-```text
-Repository<User>::save() [T = User]
-```
-
-The displayed class name already contains `User`.
-`consumeClassTemplateArgument` marks that binding as used so the parser does
-not create the incorrect result `Repository<User>::save<User>`.
-
-### Complete template example
-
-This example has both a class template and a method template:
+### Class and member templates together
 
 ```cpp
 #include <utility>
@@ -394,175 +184,111 @@ int main() {
 }
 ```
 
-For that call, GCC may provide:
-
-```text
-void Repository<T>::convert(const U&)
-    [with U = std::pair<int, double>; T = User]
-```
-
-The parser transforms it like this:
-
-```text
-1. Remove suffix:       void Repository<T>::convert(const U&)
-2. Extract name:        Repository<T>::convert
-3. Replace class T:     Repository<User>::convert
-4. Append method U:     Repository<User>::convert<std::pair<int, double>>
-```
-
-The final name clearly shows both the class type and the method type.
-It also verifies that the comma inside `std::pair<int, double>` does not split
-the compiler's binding list incorrectly. The valid logger output is:
+Output:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [Repository<User>::convert<std::pair<int, double>>] Class and member templates
 ```
 
-## What each helper does
+Template names can become long, and their exact spelling can differ between
+compilers. If that is a problem, choose a shorter context with
+`LOGGER_LOG_WITH_CONTEXT`.
 
-Read this table from top to bottom when following the code. These are internal
-results; only `normalizeFunctionSignature` supplies a context to the logger.
-Every helper example in the table is now called directly by a unit test in
-`tests/test_logger.cpp`.
+## Lambdas
 
-| Helper | Example input | Result |
-| --- | --- | --- |
-| `trim` | `"  void run()  "` | `"void run()"` |
-| `isIdentifierCharacter` | `'A'`, `'7'`, `'-'` | `true`, `true`, `false` |
-| `isIdentifier` | `"value_1"`, `"std::string"` | `true`, `false` |
-| `splitTemplateBindings` | `"U = std::pair<int, int>, T = User"` | Two items: `"U = std::pair<int, int>"` and `"T = User"` |
-| `TemplateBinding` | `{ "T", "User" }` | Stores `name = "T"` and `value = "User"` |
-| `removeTemplateSuffix` | `"void process(T) [with T = int]"` | Changes the string to `"void process(T)"`; returns `T = int` |
-| `replaceIdentifier` | Text `"Repository<T>::save"`, replace `T` with `User` | Changes text to `"Repository<User>::save"` |
-| `findNameStart` | `"public: bool Value::operator bool"` | Returns the position of `Value::operator bool` |
-| `consumeClassTemplateArgument` | Class `"Repository<User>"`, argument `"User"` | Returns `true`; marks the match only in its working copy |
-| `extractFunctionName` | `"void Service::start(int)"` | `"Service::start"` |
-| `normalizeFunctionSignature` | `"void process(T) [with T = int]"` | `"process<int>"` |
+A lambda does not have a user-written function name. The name of the variable
+holding the lambda is not included in the compiler's function signature.
 
-For the final row, the returned context appears in a complete log line like
-this:
-
-```text
-[2026-09-05 00:59:52] [INFO] [process<int>] Function template
-```
-
-## When to provide context yourself
-
-### Lambdas
-
-A lambda has no user-written function name. The variable holding a lambda is
-not part of its function signature:
+For example:
 
 ```cpp
-#include "cppColorLogger/logger.h"
-
-int main() {
-  LOGGER.setLogLevel(LogLevel::Info);
-  const auto refreshCache = []() {
-    LOGGER_LOG(LogLevel::Info, "Cache refreshed");
-  };
-  refreshCache();
-}
+const auto refreshCache = [] {
+  LOGGER_LOG(LogLevel::Info, "Cache refreshed");
+};
 ```
 
-The context will be `<lambda>`, not `refreshCache`. If the name matters, provide
-it explicitly:
-
-```cpp
-#include "cppColorLogger/logger.h"
-
-int main() {
-  LOGGER.setLogLevel(LogLevel::Info);
-  const auto refreshCache = []() {
-    LOGGER_LOG_WITH_CONTEXT(
-        LogLevel::Info,
-        "refreshCache",
-        "Cache refreshed");
-  };
-  refreshCache();
-}
-```
-
-Both choices produce valid log lines:
+The logger can identify this only as a lambda:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [<lambda>] Cache refreshed
+```
+
+If `refreshCache` is important, pass it yourself:
+
+```cpp
+const auto refreshCache = [] {
+  LOGGER_LOG_WITH_CONTEXT(
+      LogLevel::Info,
+      "refreshCache",
+      "Cache refreshed");
+};
+```
+
+Output:
+
+```text
 [2026-09-05 00:59:52] [INFO] [refreshCache] Cache refreshed
 ```
 
-### Stable or private names
+## Choosing a stable or private context
 
-Resolved template types can be long, compiler-dependent, or sensitive. Use an
-explicit context when you do not want them in the log:
+You may not want a generated template type or internal class name to appear in
+a log. You may also need exactly the same context on every compiler. In both
+cases, use `LOGGER_LOG_WITH_CONTEXT`:
 
 ```cpp
-#include "cppColorLogger/logger.h"
-
 void saveUser() {
   LOGGER_LOG_WITH_CONTEXT(
       LogLevel::Info,
       "UserRepository::save",
       "Saving user");
 }
-
-int main() {
-  LOGGER.setLogLevel(LogLevel::Info);
-  saveUser();
-}
 ```
 
-The supplied string is used exactly as the context:
+The logger uses your text exactly as written:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [UserRepository::save] Saving user
 ```
 
-### Other compilers
+## Other compilers
 
-Automatic class detection understands GCC, Clang, and MSVC signatures. On
-another compiler, logging still works by using `__func__`, but a context may
-contain only `start` instead of `Service::start`. Use
-`LOGGER_LOG_WITH_CONTEXT` when the class-qualified name is important.
+Automatic class-qualified names are supported for GCC, Clang, and MSVC. These
+compilers describe functions differently, so the logger normalizes their
+signatures to a common readable form.
 
-For example, the portable fallback and explicit versions would look like:
+On another compiler, logging still works. The logger uses the standard
+`__func__` value as a fallback, which may contain only the function name:
 
 ```text
 [2026-09-05 00:59:52] [INFO] [start] Service started
+```
+
+If the class-qualified name matters, provide it yourself:
+
+```cpp
+LOGGER_LOG_WITH_CONTEXT(
+    LogLevel::Info,
+    "Service::start",
+    "Service started");
+```
+
+Output:
+
+```text
 [2026-09-05 00:59:52] [INFO] [Service::start] Service started
 ```
 
-The first line is the possible `__func__` fallback. The second line uses
-`LOGGER_LOG_WITH_CONTEXT` and is therefore stable on every compiler.
+## Understanding the implementation
 
-## Suggested order for reading the source
+Application code should use the public macros and should not call the parser
+helpers directly.
 
-If this is your first time reading the header, use this order:
+If you want to understand or change the implementation, read
+[`contribution.md`](../contribution.md). It explains:
 
-1. Read the `LOGGER_LOG` and `LOGGER_LOG_WITH_CONTEXT` macros at the bottom of
-   `logger.h`.
-2. In the same header, read `normalizeFunctionSignature` to see the four
-   high-level steps.
-3. Read `removeTemplateSuffix` and `extractFunctionName` next.
-4. Read the smaller helpers only when you need to understand a specific edge
-   case.
-5. Read `Logger::log()` to see how the returned context enters the log message.
-
-This order starts with the public API and moves inward. Reading the small parser
-helpers from top to bottom without this context can make their purpose harder to
-see.
-
-## Changing the parser
-
-Compiler signature formats are extensions rather than a C++ standard format.
-When adding support or fixing an edge case:
-
-1. Copy the exact compiler signature into a test in `tests/test_logger.cpp`.
-2. Add the expected short context beside it.
-3. Keep new parsing code with the other internal parser helpers.
-4. Test ordinary methods, templates, nested template types, constructors,
-   destructors, operators, and lambdas when relevant.
-5. Run `make format` and `make test`.
-6. When possible, compile with both GCC and Clang because their strings differ.
-
-Application code should depend only on the logging macros and public classes,
-not on internal parser helpers.
+- Why the parser is needed.
+- What every helper does and why it exists.
+- How templates, operators, lambdas, and fallback names are handled.
+- Which behavior comes from compiler documentation.
+- How to add and test a new compiler signature safely.
