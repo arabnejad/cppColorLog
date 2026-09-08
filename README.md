@@ -265,6 +265,9 @@ LOGGER.addFileSink("history.log"); // Append is the default
 LOGGER.addFileSink("latest.log", FileOpenMode::Truncate);
 ```
 
+Both regular and rotating file sinks end entries with `\n`, producing the same
+line endings on Windows, Linux, and macOS.
+
 ### Flushing and detecting file errors
 
 #### Default behavior

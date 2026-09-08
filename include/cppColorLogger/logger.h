@@ -436,8 +436,17 @@ inline std::string extractFunctionName(const std::string &rawSignature, const st
   // An operator name can contain punctuation or spaces, so use the dedicated
   // backward scanner rather than the ordinary last-space rule.
   const std::string::size_type operatorPosition = prefix.rfind("operator");
-  if (operatorPosition != std::string::npos)
-    return prefix.substr(findNameStart(prefix, operatorPosition));
+  if (operatorPosition != std::string::npos) {
+    std::string functionName = prefix.substr(findNameStart(prefix, operatorPosition));
+
+    // MSVC writes symbolic operators with a space, such as `operator ()`.
+    // Remove that space, but keep the one in conversions such as `operator bool`.
+    const std::string::size_type operatorSpace = functionName.rfind("operator ");
+    if (operatorSpace != std::string::npos && operatorSpace + 9 < functionName.size() &&
+        !isIdentifierCharacter(functionName[operatorSpace + 9]))
+      functionName.erase(operatorSpace + 8, 1);
+    return functionName;
+  }
 
   // Ordinary functions use the same backward scan, starting at the end.
   return prefix.substr(findNameStart(prefix, prefix.size()));
@@ -771,6 +780,8 @@ private:
 /**
  * Writes complete log entries to a file and stores the first I/O error.
  *
+ * Every entry ends with the same `\n` byte on Windows, Linux, and macOS.
+ *
  * After an open, write, or flush failure, later writes are ignored. Check
  * hasError() and getLastError(), then replace the sink if recovery is needed.
  */
@@ -780,7 +791,7 @@ public:
                     FileFlushMode flushMode = FileFlushMode::AfterEachEntry)
       : m_filename(filename), m_flushMode(flushMode) {
     const std::ios::openmode fileOpenMode =
-        std::ios::out | (openMode == FileOpenMode::Append ? std::ios::app : std::ios::trunc);
+        std::ios::out | std::ios::binary | (openMode == FileOpenMode::Append ? std::ios::app : std::ios::trunc);
     m_file.open(filename.c_str(), fileOpenMode);
     if (!m_file.is_open())
       m_lastError = "Failed to open log file '" + m_filename + "'.";

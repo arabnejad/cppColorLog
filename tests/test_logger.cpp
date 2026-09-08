@@ -1603,6 +1603,8 @@ TEST(LoggerDesignTest, SignatureParserHandlesSupportedCompilerFormats) {
                                        "convert"),
             "Repository<User>::convert<std::pair<int, int>>");
   EXPECT_EQ(normalizeFunctionSignature("void Functor::operator()()", "operator()"), "Functor::operator()");
+  EXPECT_EQ(normalizeFunctionSignature("public: void __cdecl Functor::operator ()(void)", "operator()"),
+            "Functor::operator()");
   EXPECT_EQ(normalizeFunctionSignature("Value Value::operator<<(int)", "operator<<"), "Value::operator<<");
   EXPECT_EQ(normalizeFunctionSignature("public: void __cdecl Service::start(void)", "start"), "Service::start");
   EXPECT_EQ(normalizeFunctionSignature("public: __cdecl Service::Service(void)", "Service"), "Service::Service");
